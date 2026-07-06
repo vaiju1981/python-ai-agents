@@ -51,11 +51,13 @@ checkpointing, and audit storage.
    timeout, and framed/capped tool results.
 4. Long-agent memory: tenant/session-scoped conversation memory, history browsing,
    windowed short-term memory, and SQLite conversation persistence for local rollout.
-5. Durable local stores: SQLite checkpoint store and audit store. (Initial core
+5. Observability: observer hooks for turn/model/tool/error/usage events, with
+   recording, redaction, and token accounting kept separate from audit.
+6. Durable local stores: SQLite checkpoint store and audit store. (Initial core
    implementations exist.)
-6. Substrate adapters: start with one real adapter, then add more. (Ollama now
+7. Substrate adapters: start with one real adapter, then add more. (Ollama now
    supports both the `Agent` and `ModelPort` seams.)
-7. Analytics demo: multi-CSV import, profile, semantic model, governed tools,
+8. Analytics demo: multi-CSV import, profile, semantic model, governed tools,
    artifact workspace, and chat/API.
 
 The Python port tracks `java-ai-agent` deliberately; see `docs/JAVA_PARITY.md` for the

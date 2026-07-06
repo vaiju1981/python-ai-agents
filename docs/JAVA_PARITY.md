@@ -12,6 +12,7 @@ keep the same philosophy, while staying Pythonic and thin over ecosystem substra
 - Tool hardening: selector-enforced tools, argument validation, timeouts, framed/capped results.
 - Replay safety: typed stop reasons, retryability, idempotency keys, deterministic stores.
 - Long-agent memory: conversation stores, browsable history, and windowed memory.
+- Observability: observer hooks, recording, redaction, and token accounting.
 - Local runtime stores: in-memory and SQLite audit/checkpoint/idempotency stores.
 - Ollama-first live smoke tests for local/cloud model substrates.
 - Analytics demo: CSV/DuckDB catalog, safe SQL tools, relationship discovery, query planning.
@@ -20,7 +21,7 @@ keep the same philosophy, while staying Pythonic and thin over ecosystem substra
 
 - Streaming, token budgets, and structured output helpers.
 - Episodic memory with tenant boundaries.
-- Observers, redaction, recording, and replay.
+- Replay adapters that consume recorded model/tool events.
 - RAG, skills, reflection, supervision, and deep-agent planning.
 - MCP, OpenTelemetry, durable SQL stores, and production service packaging.
 

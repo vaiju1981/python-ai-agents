@@ -11,6 +11,7 @@ from python_ai_agents import (
     Message,
     ModelRequest,
     ModelResponse,
+    RecordingObserver,
     RequestContext,
 )
 from python_ai_agents.adapters import DEFAULT_OLLAMA_TEST_MODELS, OllamaAgent, OllamaModelPort
@@ -147,5 +148,29 @@ def test_live_default_agent_persists_memory_with_ollama_model_port() -> None:
         assert first.output.strip()
         assert second.output.strip()
         assert len(store.messages("tenant-a", "ollama-memory")) == 4
+
+    anyio.run(run)
+
+
+@pytest.mark.skipif(
+    os.environ.get("PAA_RUN_OLLAMA_TESTS") != "1",
+    reason="set PAA_RUN_OLLAMA_TESTS=1 to run live Ollama model smoke tests",
+)
+@pytest.mark.ollama
+def test_live_default_agent_observer_records_ollama_turn() -> None:
+    async def run() -> None:
+        model = OllamaModelPort("ornith:latest", options={"temperature": 0}, timeout=180)
+        if not await model.has_model():
+            pytest.skip("Ollama model is not available: ornith:latest")
+
+        observer = RecordingObserver()
+        response = await DefaultAgent(model, observers=[observer]).run(
+            AgentRequest.ephemeral("Reply with exactly: ok")
+        )
+
+        assert response.output.strip()
+        assert len(observer.model_requests) == 1
+        assert len(observer.model_responses) == 1
+        assert observer.turn_responses == [response]
 
     anyio.run(run)

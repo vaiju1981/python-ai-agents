@@ -35,6 +35,13 @@ from python_ai_agents.core.model import (
     ToolCall,
     Usage,
 )
+from python_ai_agents.core.observe import (
+    AgentObserver,
+    NoopAgentObserver,
+    RecordingObserver,
+    RedactingObserver,
+    TokenAccountingObserver,
+)
 from python_ai_agents.core.tool import (
     AllTools,
     AllowListToolSelector,
@@ -54,6 +61,7 @@ from python_ai_agents.core.trust import Trust
 
 __all__ = [
     "Agent",
+    "AgentObserver",
     "AgentRequest",
     "AgentResponse",
     "AllTools",
@@ -81,8 +89,11 @@ __all__ = [
     "ModelPort",
     "ModelRequest",
     "ModelResponse",
+    "NoopAgentObserver",
     "NoopToolArgumentValidator",
     "RequestContext",
+    "RecordingObserver",
+    "RedactingObserver",
     "RequiredArgumentsValidator",
     "Role",
     "SessionSummary",
@@ -100,6 +111,7 @@ __all__ = [
     "ToolResult",
     "ToolSelector",
     "ToolSpec",
+    "TokenAccountingObserver",
     "Trust",
     "Usage",
     "WindowedMemory",

@@ -35,6 +35,7 @@ The first core runtime slice includes:
 - tenant/session-scoped conversation memory for long-running agents;
 - in-memory and SQLite audit/checkpoint stores;
 - SQLite conversation storage for durable local rollout without file-based logs;
+- observer hooks for telemetry, recording, redaction, and usage accounting;
 - idempotency and retryability primitives for replay-safe products.
 
 ## Flagship Demo: Analytics Agent

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from time import perf_counter
 from typing import Any
 
 import anyio
@@ -15,6 +16,7 @@ from python_ai_agents.core.memory import (
     Memory,
 )
 from python_ai_agents.core.model import Message, ModelPort, ModelRequest, ModelResponse, Role
+from python_ai_agents.core.observe import AgentObserver
 from python_ai_agents.core.tool import (
     AllTools,
     DenyEffectfulTools,
@@ -43,6 +45,7 @@ class DefaultAgent:
     argument_validator: ToolArgumentValidator = field(default_factory=NoopToolArgumentValidator)
     tool_approver: ToolApprover = field(default_factory=DenyEffectfulTools)
     audit_sink: AuditSink = field(default_factory=NullAuditSink)
+    observers: list[AgentObserver] = field(default_factory=list)
     conversation_store: ConversationStore | None = None
     remember_conversation: bool = True
     tool_timeout_seconds: float | None = 30.0
@@ -50,9 +53,13 @@ class DefaultAgent:
     frame_tool_results: bool = True
 
     async def run(self, request: AgentRequest) -> AgentResponse:
+        turn_start = perf_counter()
+        await self._notify("on_turn_start", request.input)
         if not self.remember_conversation:
             memory = _new_turn_memory(self.system_prompt, request.input)
-            return await self._run_with_memory(request, memory, persist_response=False)
+            response = await self._run_with_memory(request, memory, persist_response=False)
+            await self._notify("on_turn_end", response, _duration_since(turn_start))
+            return response
 
         if self.conversation_store is None:
             self.conversation_store = InMemoryConversationStore()
@@ -64,7 +71,9 @@ class DefaultAgent:
             if self.system_prompt and not _has_system_prompt(memory, self.system_prompt):
                 memory.add(Message.system(self.system_prompt))
             memory.add(Message.user(request.input))
-            return await self._run_with_memory(request, memory, persist_response=True)
+            response = await self._run_with_memory(request, memory, persist_response=True)
+            await self._notify("on_turn_end", response, _duration_since(turn_start))
+            return response
 
     async def _run_with_memory(
         self,
@@ -78,18 +87,34 @@ class DefaultAgent:
 
         for _step in range(max(1, self.max_steps)):
             if _deadline_exceeded(request):
-                return AgentResponse.stopped("I ran out of time on this request.", "deadline_exceeded")
+                return AgentResponse.stopped(
+                    "I ran out of time on this request.",
+                    "deadline_exceeded",
+                )
 
             try:
-                response = await self.model.chat(ModelRequest(memory.history(), tool_specs))
-            except Exception:
+                model_request = ModelRequest(memory.history(), tool_specs)
+                await self._notify("on_model_call", model_request)
+                model_start = perf_counter()
+                response = await self.model.chat(model_request)
+                model_latency = _duration_since(model_start)
+                await self._notify("on_model_response", response, model_latency)
+                await self._notify("on_usage", _model_name(self.model), response.usage)
+            except Exception as exc:
                 await self._record(AuditEvent.now("error", request.context, "model error"))
+                await self._notify("on_error", "model", exc)
                 return AgentResponse.stopped(MODEL_ERROR_MESSAGE, "model_error")
 
             if response.has_tool_calls:
                 memory.add(Message.assistant(response.text, response.tool_calls))
                 for call in response.tool_calls:
-                    result = await self._invoke_tool(call.name, call.arguments, request, tool_by_name)
+                    await self._notify("on_tool_call", call)
+                    result = await self._invoke_tool(
+                        call.name,
+                        call.arguments,
+                        request,
+                        tool_by_name,
+                    )
                     memory.add(
                         Message.tool_result(
                             call.id,
@@ -115,7 +140,9 @@ class DefaultAgent:
         tool = tool_by_name.get(name)
         if tool is None:
             await self._record(AuditEvent.now("tool.unavailable", request.context, f"tool={name}"))
-            return ToolResult.failed(f"tool '{name}' is not available")
+            result = ToolResult.failed(f"tool '{name}' is not available")
+            await self._notify("on_tool_result", name, result, timedelta(0))
+            return result
 
         validation = await self.argument_validator.validate(tool.spec, arguments, request.context)
         if not validation.allowed:
@@ -126,17 +153,26 @@ class DefaultAgent:
                     f"tool={name} reason={validation.reason}",
                 )
             )
-            return ToolResult.failed(validation.reason)
+            result = ToolResult.failed(validation.reason)
+            await self._notify("on_tool_result", name, result, timedelta(0))
+            return result
 
         decision = await self.tool_approver.approve(tool.spec, arguments, request.context)
         if not decision.allowed:
             await self._record(
-                AuditEvent.now("tool.denied", request.context, f"tool={name} reason={decision.reason}")
+                AuditEvent.now(
+                    "tool.denied",
+                    request.context,
+                    f"tool={name} reason={decision.reason}",
+                )
             )
-            return ToolResult.failed(decision.reason)
+            result = ToolResult.failed(decision.reason)
+            await self._notify("on_tool_result", name, result, timedelta(0))
+            return result
 
         await self._record(AuditEvent.now("tool.start", request.context, f"tool={name}"))
         try:
+            tool_start = perf_counter()
             result = await _invoke_with_timeout(
                 tool,
                 arguments,
@@ -145,18 +181,33 @@ class DefaultAgent:
             )
             if result is None:
                 await self._record(AuditEvent.now("tool.timeout", request.context, f"tool={name}"))
-                return ToolResult.failed(f"tool '{name}' timed out")
+                timed_out = ToolResult.failed(f"tool '{name}' timed out")
+                await self._notify("on_tool_result", name, timed_out, _duration_since(tool_start))
+                return timed_out
         except Exception:
             await self._record(AuditEvent.now("tool.error", request.context, f"tool={name}"))
-            return ToolResult.failed(f"tool '{name}' failed")
+            await self._notify("on_error", "tool", RuntimeError(f"tool '{name}' failed"))
+            failed = ToolResult.failed(f"tool '{name}' failed")
+            await self._notify("on_tool_result", name, failed, _duration_since(tool_start))
+            return failed
         await self._record(AuditEvent.now("tool.end", request.context, f"tool={name}"))
-        return ToolResult(result.content[: self.max_tool_result_chars], result.error)
+        capped = ToolResult(result.content[: self.max_tool_result_chars], result.error)
+        await self._notify("on_tool_result", name, capped, _duration_since(tool_start))
+        return capped
 
     async def _record(self, event: AuditEvent) -> None:
         try:
             await self.audit_sink.record(event)
         except Exception:
             return None
+
+    async def _notify(self, method: str, *args) -> None:
+        for observer in self.observers:
+            try:
+                callback = getattr(observer, method)
+                await callback(*args)
+            except Exception:
+                continue
 
 
 def _deadline_exceeded(request: AgentRequest) -> bool:
@@ -201,3 +252,14 @@ def _has_system_prompt(memory: Memory, system_prompt: str) -> bool:
         message.role == Role.SYSTEM and message.content == system_prompt
         for message in memory.history()
     )
+
+
+def _duration_since(start: float) -> timedelta:
+    return timedelta(seconds=perf_counter() - start)
+
+
+def _model_name(model: ModelPort) -> str:
+    value = getattr(model, "model", None)
+    if isinstance(value, str):
+        return value
+    return model.__class__.__name__
