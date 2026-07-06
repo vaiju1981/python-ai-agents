@@ -51,3 +51,15 @@ checkpointing, and audit storage.
 4. Substrate adapters: start with one real adapter, then add more.
 5. Analytics demo: multi-CSV import, profile, semantic model, governed tools,
    artifact workspace, and chat/API.
+
+## Test Model Substrates
+
+Ollama is the first lightweight local/cloud model test substrate. The adapter lives
+outside core in `python_ai_agents.adapters` and talks to Ollama's HTTP API without
+adding a client dependency.
+
+The opt-in live smoke-test matrix is:
+
+- `gemma4:31b-cloud`
+- `hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0`
+- `ornith:latest`

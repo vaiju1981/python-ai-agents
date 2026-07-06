@@ -87,3 +87,23 @@ conda activate python-ai-agents-analytics
 
 The analytics dependencies are intentionally demo-scoped. They should not be imported by
 `python_ai_agents.core`.
+
+### Ollama Model Tests
+
+The Ollama adapter uses Ollama's local HTTP API with the Python standard library, so it
+does not add a dependency to core.
+
+The live model smoke tests are opt-in:
+
+```bash
+ollama list
+PAA_RUN_OLLAMA_TESTS=1 python -m pytest tests/test_ollama_adapter.py
+```
+
+The default live test matrix is:
+
+- `gemma4:31b-cloud`
+- `hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0`
+- `ornith:latest`
+
+Normal test runs use a fake Ollama transport and do not require Ollama to be running.
