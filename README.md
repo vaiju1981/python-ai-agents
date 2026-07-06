@@ -24,6 +24,16 @@ The core stays intentionally small.
 SQLite is acceptable in core because it is part of Python's standard library and is useful for
 coordination, recovery, checkpoints, and audit.
 
+## Core Runtime Shape
+
+The first core runtime slice includes:
+
+- a universal `Agent` seam;
+- a small `ModelPort` seam for chat-model adapters;
+- a `DefaultAgent` loop that can call tools through the trust/approval surface;
+- in-memory and SQLite audit/checkpoint stores;
+- idempotency and retryability primitives for replay-safe products.
+
 ## Flagship Demo: Analytics Agent
 
 The analytics demo is a complete application, not a notebook:

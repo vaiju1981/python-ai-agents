@@ -4,8 +4,8 @@ from typing import Any
 import anyio
 import pytest
 
-from python_ai_agents import AgentRequest
-from python_ai_agents.adapters import DEFAULT_OLLAMA_TEST_MODELS, OllamaAgent
+from python_ai_agents import AgentRequest, DefaultAgent, Message, ModelRequest, ModelResponse
+from python_ai_agents.adapters import DEFAULT_OLLAMA_TEST_MODELS, OllamaAgent, OllamaModelPort
 
 
 class FakeOllamaTransport:
@@ -70,6 +70,17 @@ def test_ollama_agent_lists_models() -> None:
     anyio.run(run)
 
 
+def test_ollama_model_port_returns_model_response() -> None:
+    async def run() -> None:
+        model = OllamaModelPort("ornith:latest", transport=FakeOllamaTransport())
+
+        response = await model.chat(request=ModelRequest((Message.user("ping"),)))
+
+        assert response == ModelResponse.text_response("pong")
+
+    anyio.run(run)
+
+
 @pytest.mark.skipif(
     os.environ.get("PAA_RUN_OLLAMA_TESTS") != "1",
     reason="set PAA_RUN_OLLAMA_TESTS=1 to run live Ollama model smoke tests",
@@ -83,6 +94,24 @@ def test_live_ollama_models_respond(model: str) -> None:
             pytest.skip(f"Ollama model is not available: {model}")
 
         response = await agent.run(AgentRequest.ephemeral("Reply with exactly: ok"))
+
+        assert response.output.strip()
+
+    anyio.run(run)
+
+
+@pytest.mark.skipif(
+    os.environ.get("PAA_RUN_OLLAMA_TESTS") != "1",
+    reason="set PAA_RUN_OLLAMA_TESTS=1 to run live Ollama model smoke tests",
+)
+@pytest.mark.ollama
+def test_live_default_agent_runs_through_ollama_model_port() -> None:
+    async def run() -> None:
+        model = OllamaModelPort("ornith:latest", options={"temperature": 0}, timeout=180)
+        if not await model.has_model():
+            pytest.skip("Ollama model is not available: ornith:latest")
+
+        response = await DefaultAgent(model).run(AgentRequest.ephemeral("Reply with exactly: ok"))
 
         assert response.output.strip()
 

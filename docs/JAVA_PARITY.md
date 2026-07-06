@@ -6,7 +6,9 @@ keep the same philosophy, while staying Pythonic and thin over ecosystem substra
 ## Port First
 
 - Universal seams: `Agent`, `AgentRequest`, `AgentResponse`, `RequestContext`.
+- Model seams: `ModelPort`, `ModelRequest`, `ModelResponse`, `Message`, `ToolCall`.
 - Trust at the seam: `Trust.govern`, guardrails, deadlines, tool approval, audit.
+- Default runtime loop: `DefaultAgent` over model calls and governed tool calls.
 - Replay safety: typed stop reasons, retryability, idempotency keys, deterministic stores.
 - Local runtime stores: in-memory and SQLite audit/checkpoint/idempotency stores.
 - Ollama-first live smoke tests for local/cloud model substrates.
@@ -14,7 +16,7 @@ keep the same philosophy, while staying Pythonic and thin over ecosystem substra
 
 ## Port Later
 
-- ModelPort abstractions, streaming, token budgets, and structured output helpers.
+- Streaming, token budgets, and structured output helpers.
 - Conversation and episodic memory with tenant boundaries.
 - Observers, redaction, recording, and replay.
 - RAG, skills, reflection, supervision, and deep-agent planning.

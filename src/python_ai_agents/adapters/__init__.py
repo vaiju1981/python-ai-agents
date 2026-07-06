@@ -5,6 +5,7 @@ from python_ai_agents.adapters.ollama import (
     OllamaAgent,
     OllamaError,
     OllamaHttpTransport,
+    OllamaModelPort,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "OllamaAgent",
     "OllamaError",
     "OllamaHttpTransport",
+    "OllamaModelPort",
 ]

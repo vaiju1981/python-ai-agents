@@ -9,11 +9,21 @@ from python_ai_agents.core.checkpoint import (
     SQLiteCheckpointStore,
 )
 from python_ai_agents.core.context import RequestContext
+from python_ai_agents.core.default_agent import DefaultAgent
 from python_ai_agents.core.guardrail import Guardrail, GuardrailDecision, GuardrailStage
 from python_ai_agents.core.idempotency import (
     IdempotencyStore,
     IdempotentAgent,
     InMemoryIdempotencyStore,
+)
+from python_ai_agents.core.model import (
+    Message,
+    ModelPort,
+    ModelRequest,
+    ModelResponse,
+    Role,
+    ToolCall,
+    Usage,
 )
 from python_ai_agents.core.tool import (
     DenyEffectfulTools,
@@ -34,6 +44,7 @@ __all__ = [
     "AuditSink",
     "Checkpoint",
     "CheckpointStore",
+    "DefaultAgent",
     "DenyEffectfulTools",
     "Guardrail",
     "GuardrailDecision",
@@ -43,16 +54,23 @@ __all__ = [
     "InMemoryAuditSink",
     "InMemoryCheckpointStore",
     "InMemoryIdempotencyStore",
+    "Message",
+    "ModelPort",
+    "ModelRequest",
+    "ModelResponse",
     "RequestContext",
+    "Role",
     "SQLiteAuditSink",
     "SQLiteCheckpointStore",
     "StopCategory",
     "StopReason",
     "Tool",
     "ToolApprover",
+    "ToolCall",
     "ToolDecision",
     "ToolEffect",
     "ToolResult",
     "ToolSpec",
     "Trust",
+    "Usage",
 ]

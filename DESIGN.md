@@ -43,12 +43,14 @@ checkpointing, and audit storage.
 ## Initial Milestones
 
 1. Core protocols and dataclasses: `Agent`, `AgentRequest`, `AgentResponse`,
-   `RequestContext`, `Tool`, `ToolEffect`, `ToolApprover`, `AuditSink`.
+   `RequestContext`, `ModelPort`, `Message`, `ToolCall`, `Tool`, `ToolEffect`,
+   `ToolApprover`, `AuditSink`.
 2. Trust wrapper: input/output guardrails, deadlines, tool policy hooks, audit.
    (Initial agent and tool wrappers exist.)
 3. Durable local stores: SQLite checkpoint store and audit store. (Initial core
    implementations exist.)
-4. Substrate adapters: start with one real adapter, then add more.
+4. Substrate adapters: start with one real adapter, then add more. (Ollama now
+   supports both the `Agent` and `ModelPort` seams.)
 5. Analytics demo: multi-CSV import, profile, semantic model, governed tools,
    artifact workspace, and chat/API.
 
