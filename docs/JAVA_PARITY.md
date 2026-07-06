@@ -11,6 +11,7 @@ keep the same philosophy, while staying Pythonic and thin over ecosystem substra
 - Default runtime loop: `DefaultAgent` over model calls and governed tool calls.
 - Tool hardening: selector-enforced tools, argument validation, timeouts, framed/capped results.
 - Replay safety: typed stop reasons, retryability, idempotency keys, deterministic stores.
+- Long-agent memory: conversation stores, browsable history, and windowed memory.
 - Local runtime stores: in-memory and SQLite audit/checkpoint/idempotency stores.
 - Ollama-first live smoke tests for local/cloud model substrates.
 - Analytics demo: CSV/DuckDB catalog, safe SQL tools, relationship discovery, query planning.
@@ -18,7 +19,7 @@ keep the same philosophy, while staying Pythonic and thin over ecosystem substra
 ## Port Later
 
 - Streaming, token budgets, and structured output helpers.
-- Conversation and episodic memory with tenant boundaries.
+- Episodic memory with tenant boundaries.
 - Observers, redaction, recording, and replay.
 - RAG, skills, reflection, supervision, and deep-agent planning.
 - MCP, OpenTelemetry, durable SQL stores, and production service packaging.

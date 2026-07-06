@@ -32,6 +32,7 @@ The first core runtime slice includes:
 - a small `ModelPort` seam for chat-model adapters;
 - a `DefaultAgent` loop that can call selected tools through validation, approval,
   timeout, and result-capping hooks;
+- tenant/session-scoped conversation memory for long-running agents;
 - in-memory and SQLite audit/checkpoint stores;
 - idempotency and retryability primitives for replay-safe products.
 

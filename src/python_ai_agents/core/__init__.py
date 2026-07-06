@@ -16,6 +16,15 @@ from python_ai_agents.core.idempotency import (
     IdempotentAgent,
     InMemoryIdempotencyStore,
 )
+from python_ai_agents.core.memory import (
+    ConversationHistory,
+    ConversationStore,
+    InMemoryConversationStore,
+    InMemoryMemory,
+    Memory,
+    SessionSummary,
+    WindowedMemory,
+)
 from python_ai_agents.core.model import (
     Message,
     ModelPort,
@@ -52,6 +61,8 @@ __all__ = [
     "AuditSink",
     "Checkpoint",
     "CheckpointStore",
+    "ConversationHistory",
+    "ConversationStore",
     "DefaultAgent",
     "DenyEffectfulTools",
     "Guardrail",
@@ -61,8 +72,11 @@ __all__ = [
     "IdempotentAgent",
     "InMemoryAuditSink",
     "InMemoryCheckpointStore",
+    "InMemoryConversationStore",
     "InMemoryIdempotencyStore",
+    "InMemoryMemory",
     "Message",
+    "Memory",
     "ModelPort",
     "ModelRequest",
     "ModelResponse",
@@ -70,6 +84,7 @@ __all__ = [
     "RequestContext",
     "RequiredArgumentsValidator",
     "Role",
+    "SessionSummary",
     "SQLiteAuditSink",
     "SQLiteCheckpointStore",
     "StopCategory",
@@ -85,4 +100,5 @@ __all__ = [
     "ToolSpec",
     "Trust",
     "Usage",
+    "WindowedMemory",
 ]

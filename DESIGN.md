@@ -49,11 +49,13 @@ checkpointing, and audit storage.
    (Initial agent and tool wrappers exist.)
 3. Tool hardening: selected-tools enforcement, argument validation seams, per-tool
    timeout, and framed/capped tool results.
-4. Durable local stores: SQLite checkpoint store and audit store. (Initial core
+4. Long-agent memory: tenant/session-scoped conversation memory, history browsing,
+   and windowed short-term memory.
+5. Durable local stores: SQLite checkpoint store and audit store. (Initial core
    implementations exist.)
-5. Substrate adapters: start with one real adapter, then add more. (Ollama now
+6. Substrate adapters: start with one real adapter, then add more. (Ollama now
    supports both the `Agent` and `ModelPort` seams.)
-6. Analytics demo: multi-CSV import, profile, semantic model, governed tools,
+7. Analytics demo: multi-CSV import, profile, semantic model, governed tools,
    artifact workspace, and chat/API.
 
 The Python port tracks `java-ai-agent` deliberately; see `docs/JAVA_PARITY.md` for the

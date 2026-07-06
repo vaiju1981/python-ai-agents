@@ -8,7 +8,13 @@ import anyio
 
 from python_ai_agents.core.agent import AgentRequest, AgentResponse
 from python_ai_agents.core.audit import AuditEvent, AuditSink, NullAuditSink
-from python_ai_agents.core.model import Message, ModelPort, ModelRequest, ModelResponse
+from python_ai_agents.core.memory import (
+    ConversationStore,
+    InMemoryConversationStore,
+    InMemoryMemory,
+    Memory,
+)
+from python_ai_agents.core.model import Message, ModelPort, ModelRequest, ModelResponse, Role
 from python_ai_agents.core.tool import (
     AllTools,
     DenyEffectfulTools,
@@ -37,16 +43,35 @@ class DefaultAgent:
     argument_validator: ToolArgumentValidator = field(default_factory=NoopToolArgumentValidator)
     tool_approver: ToolApprover = field(default_factory=DenyEffectfulTools)
     audit_sink: AuditSink = field(default_factory=NullAuditSink)
+    conversation_store: ConversationStore | None = None
+    remember_conversation: bool = True
     tool_timeout_seconds: float | None = 30.0
     max_tool_result_chars: int = 8_000
     frame_tool_results: bool = True
 
     async def run(self, request: AgentRequest) -> AgentResponse:
-        history: list[Message] = []
-        if self.system_prompt:
-            history.append(Message.system(self.system_prompt))
-        history.append(Message.user(request.input))
+        if not self.remember_conversation:
+            memory = _new_turn_memory(self.system_prompt, request.input)
+            return await self._run_with_memory(request, memory, persist_response=False)
 
+        if self.conversation_store is None:
+            self.conversation_store = InMemoryConversationStore()
+
+        async with self.conversation_store.memory(
+            request.context.tenant,
+            request.context.session_id,
+        ) as memory:
+            if self.system_prompt and not _has_system_prompt(memory, self.system_prompt):
+                memory.add(Message.system(self.system_prompt))
+            memory.add(Message.user(request.input))
+            return await self._run_with_memory(request, memory, persist_response=True)
+
+    async def _run_with_memory(
+        self,
+        request: AgentRequest,
+        memory: Memory,
+        persist_response: bool,
+    ) -> AgentResponse:
         active_tools = self.tool_selector.select(request.input, list(self.tools), request.context)
         tool_by_name = {tool.spec.name: tool for tool in active_tools}
         tool_specs = tuple(tool.spec for tool in active_tools)
@@ -56,16 +81,16 @@ class DefaultAgent:
                 return AgentResponse.stopped("I ran out of time on this request.", "deadline_exceeded")
 
             try:
-                response = await self.model.chat(ModelRequest(tuple(history), tool_specs))
+                response = await self.model.chat(ModelRequest(memory.history(), tool_specs))
             except Exception:
                 await self._record(AuditEvent.now("error", request.context, "model error"))
                 return AgentResponse.stopped(MODEL_ERROR_MESSAGE, "model_error")
 
             if response.has_tool_calls:
-                history.append(Message.assistant(response.text, response.tool_calls))
+                memory.add(Message.assistant(response.text, response.tool_calls))
                 for call in response.tool_calls:
                     result = await self._invoke_tool(call.name, call.arguments, request, tool_by_name)
-                    history.append(
+                    memory.add(
                         Message.tool_result(
                             call.id,
                             call.name,
@@ -74,6 +99,8 @@ class DefaultAgent:
                     )
                 continue
 
+            if persist_response:
+                memory.add(Message.assistant(response.text))
             return AgentResponse.completed(response.text)
 
         return AgentResponse.stopped(MAX_STEPS_MESSAGE, "max_steps")
@@ -159,3 +186,18 @@ def _tool_result_for_model(name: str, result: ToolResult, frame: bool) -> str:
         return result.content
     status = "error" if result.error else "ok"
     return f"tool '{name}' result ({status}):\n{result.content}"
+
+
+def _new_turn_memory(system_prompt: str | None, input_text: str) -> Memory:
+    memory = InMemoryMemory()
+    if system_prompt:
+        memory.add(Message.system(system_prompt))
+    memory.add(Message.user(input_text))
+    return memory
+
+
+def _has_system_prompt(memory: Memory, system_prompt: str) -> bool:
+    return any(
+        message.role == Role.SYSTEM and message.content == system_prompt
+        for message in memory.history()
+    )
