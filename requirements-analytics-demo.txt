@@ -1,0 +1,2 @@
+-e .[analytics-demo]
+

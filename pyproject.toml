@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "python-ai-agents"
+version = "0.1.0"
+description = "A thin orchestration, trust, and product-runtime layer for Python AI agents."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Vaijanath Rao" }]
+dependencies = [
+  "anyio>=4.0",
+  "pydantic>=2.7",
+  "typing-extensions>=4.12; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+openai-agents = ["openai-agents>=0.2"]
+pydantic-ai = ["pydantic-ai>=0.7"]
+langgraph = ["langgraph>=0.6"]
+litellm = ["litellm>=1.0"]
+analytics-demo = [
+  "duckdb>=1.1",
+  "polars>=1.0",
+  "pandas>=2.0",
+  "plotly>=5.0",
+  "streamlit>=1.35",
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "scikit-learn>=1.4",
+  "statsmodels>=0.14",
+]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.6",
+  "mypy>=1.10",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/python_ai_agents"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+packages = ["python_ai_agents"]
+

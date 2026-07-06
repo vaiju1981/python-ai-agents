@@ -1,0 +1,89 @@
+# python-ai-agents
+
+A thin orchestration, trust, and product-runtime layer for building Python AI agents.
+
+You bring the substrate: OpenAI Agents SDK, Pydantic AI, LangGraph, LlamaIndex,
+AutoGen, local models, cloud models, and Python data tools.
+
+`python-ai-agents` gives you the product layer above them: request context,
+tool authorization, guardrails, audit, durable workspaces, checkpoints, replay,
+eval discipline, and adapters that let agents compose behind one seam.
+
+This project is not a replacement for LangChain, LangGraph, Pydantic AI, OpenAI
+Agents SDK, or AutoGen. It uses them as dependencies and adds a small,
+opinionated layer for building long-running, governed, observable products.
+
+## Dependency Shape
+
+The core stays intentionally small.
+
+- `python_ai_agents.core`: no analytics, UI, dataframe, plotting, or ML dependencies.
+- `python_ai_agents.adapters`: optional substrate adapters.
+- `demos/analytics`: owns DuckDB, Polars/Pandas, Plotly, Streamlit/FastAPI, and ML dependencies.
+
+SQLite is acceptable in core because it is part of Python's standard library and is useful for
+coordination, recovery, checkpoints, and audit.
+
+## Flagship Demo: Analytics Agent
+
+The analytics demo is a complete application, not a notebook:
+
+- upload one or more CSVs;
+- import them into DuckDB;
+- profile columns and infer metrics, dimensions, time columns, keys, and relationships;
+- ask natural-language questions through governed read-only tools;
+- generate SQL, tables, charts, exports, and workspace artifacts;
+- refine the semantic catalog with LLM assistance.
+
+It exists to prove the thin core can support real products.
+
+## Local Environment
+
+The initial development environment is the existing Conda env:
+
+```bash
+conda activate mlv2Py3
+python --version
+```
+
+The current target is Python 3.10+.
+
+### Install Core
+
+From the repo root:
+
+```bash
+python -m pip install -r requirements-core.txt
+```
+
+For core development:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest
+```
+
+Or create a Conda environment:
+
+```bash
+conda env create -f environment.yml
+conda activate python-ai-agents
+```
+
+### Install Analytics Demo
+
+From the repo root:
+
+```bash
+python -m pip install -r requirements-analytics-demo.txt
+```
+
+Or create a demo-focused Conda environment:
+
+```bash
+conda env create -f environment-analytics-demo.yml
+conda activate python-ai-agents-analytics
+```
+
+The analytics dependencies are intentionally demo-scoped. They should not be imported by
+`python_ai_agents.core`.
