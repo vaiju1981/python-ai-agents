@@ -52,6 +52,9 @@ checkpointing, and audit storage.
 5. Analytics demo: multi-CSV import, profile, semantic model, governed tools,
    artifact workspace, and chat/API.
 
+The Python port tracks `java-ai-agent` deliberately; see `docs/JAVA_PARITY.md` for the
+conversion map and sequencing.
+
 ## Test Model Substrates
 
 Ollama is the first lightweight local/cloud model test substrate. The adapter lives

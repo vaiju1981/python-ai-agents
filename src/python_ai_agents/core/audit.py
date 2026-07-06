@@ -47,6 +47,29 @@ class NullAuditSink:
         return None
 
 
+class InMemoryAuditSink:
+    """Keeps audit events in memory for tests and local inspection."""
+
+    def __init__(self) -> None:
+        self._events: list[AuditEvent] = []
+
+    async def record(self, event: AuditEvent) -> None:
+        self._events.append(event)
+
+    def events(
+        self,
+        *,
+        trace_id: str | None = None,
+        session_id: str | None = None,
+    ) -> list[AuditEvent]:
+        events = list(self._events)
+        if trace_id is not None:
+            events = [event for event in events if event.trace_id == trace_id]
+        if session_id is not None:
+            events = [event for event in events if event.session_id == session_id]
+        return events
+
+
 class SQLiteAuditSink:
     """SQLite-backed audit sink for local product runtimes."""
 

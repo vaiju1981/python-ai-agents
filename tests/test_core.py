@@ -8,8 +8,14 @@ from python_ai_agents import (
     Checkpoint,
     GuardrailDecision,
     GuardrailStage,
+    InMemoryAuditSink,
+    InMemoryCheckpointStore,
+    InMemoryIdempotencyStore,
+    RequestContext,
     SQLiteAuditSink,
     SQLiteCheckpointStore,
+    StopCategory,
+    StopReason,
     ToolEffect,
     ToolResult,
     ToolSpec,
@@ -18,7 +24,11 @@ from python_ai_agents import (
 
 
 class EchoAgent:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def run(self, request: AgentRequest) -> AgentResponse:
+        self.calls += 1
         return AgentResponse.completed(request.input)
 
 
@@ -55,6 +65,15 @@ def test_govern_blocks_input() -> None:
         assert response.stop_reason == "test_block"
 
     anyio.run(run)
+
+
+def test_response_stop_reason_classification() -> None:
+    assert AgentResponse.completed("ok").is_completed
+    assert AgentResponse.completed("ok").reason == StopReason.COMPLETED
+    assert AgentResponse.stopped("later", "deadline_exceeded").retryable
+    assert AgentResponse.stopped("later", "deadline_exceeded").reason.category == StopCategory.TIMEOUT
+    assert AgentResponse.blocked_response("blocked", "policy").reason == StopReason.BLOCKED
+    assert not AgentResponse.stopped("too much", "budget_exceeded").retryable
 
 
 def test_govern_honors_expired_deadline() -> None:
@@ -98,6 +117,19 @@ def test_sqlite_checkpoint_store_round_trips(tmp_path) -> None:
     anyio.run(run)
 
 
+def test_in_memory_checkpoint_store_evicts_oldest() -> None:
+    async def run() -> None:
+        store = InMemoryCheckpointStore(max_entries=1)
+
+        await store.save(Checkpoint("tenant-a", "run-1", "{}"))
+        await store.save(Checkpoint("tenant-a", "run-2", "{}"))
+
+        assert await store.load("tenant-a", "run-1") is None
+        assert await store.load("tenant-a", "run-2") == Checkpoint("tenant-a", "run-2", "{}")
+
+    anyio.run(run)
+
+
 def test_sqlite_audit_sink_records_governed_turn(tmp_path) -> None:
     async def run() -> None:
         audit = SQLiteAuditSink(tmp_path / "runtime.sqlite3")
@@ -110,6 +142,22 @@ def test_sqlite_audit_sink_records_governed_turn(tmp_path) -> None:
         assert [event.event_type for event in events] == ["turn.start", "turn.end"]
         assert events[0].session_id == request.context.session_id
         assert events[-1].detail == "stopReason=completed"
+
+    anyio.run(run)
+
+
+def test_in_memory_audit_sink_filters_events() -> None:
+    async def run() -> None:
+        audit = InMemoryAuditSink()
+        request = AgentRequest.ephemeral("hello")
+
+        await Trust.govern(EchoAgent(), audit_sink=audit).run(request)
+
+        assert [event.event_type for event in audit.events(trace_id=request.context.trace_id)] == [
+            "turn.start",
+            "turn.end",
+        ]
+        assert audit.events(session_id="missing") == []
 
     anyio.run(run)
 
@@ -127,6 +175,58 @@ def test_govern_tool_allows_read_only_tool(tmp_path) -> None:
             "tool.start",
             "tool.end",
         ]
+
+    anyio.run(run)
+
+
+def test_idempotent_agent_replays_non_retryable_response() -> None:
+    async def run() -> None:
+        delegate = EchoAgent()
+        agent = Trust.idempotent(delegate, InMemoryIdempotencyStore())
+        context = RequestContext(
+            session_id="session-1",
+            principal="user-1",
+            tenant="tenant-a",
+            attributes={"idempotencyKey": "request-1"},
+        )
+
+        first = await agent.run(AgentRequest("first", context))
+        second = await agent.run(AgentRequest("second", context))
+
+        assert first == AgentResponse.completed("first")
+        assert second == first
+        assert delegate.calls == 1
+
+    anyio.run(run)
+
+
+def test_idempotent_agent_does_not_cache_retryable_response() -> None:
+    class FlakyAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, request: AgentRequest) -> AgentResponse:
+            self.calls += 1
+            if self.calls == 1:
+                return AgentResponse.stopped("try again", "model_error")
+            return AgentResponse.completed(request.input)
+
+    async def run() -> None:
+        delegate = FlakyAgent()
+        agent = Trust.idempotent(delegate, InMemoryIdempotencyStore())
+        context = RequestContext(
+            session_id="session-1",
+            principal="user-1",
+            tenant="tenant-a",
+            attributes={"idempotencyKey": "request-1"},
+        )
+
+        first = await agent.run(AgentRequest("first", context))
+        second = await agent.run(AgentRequest("second", context))
+
+        assert first.retryable
+        assert second == AgentResponse.completed("second")
+        assert delegate.calls == 2
 
     anyio.run(run)
 

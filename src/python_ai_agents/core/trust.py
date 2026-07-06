@@ -10,6 +10,11 @@ from python_ai_agents.core.agent import Agent, AgentRequest, AgentResponse
 from python_ai_agents.core.audit import AuditEvent, AuditSink, NullAuditSink
 from python_ai_agents.core.context import RequestContext
 from python_ai_agents.core.guardrail import Guardrail, GuardrailDecision, GuardrailStage
+from python_ai_agents.core.idempotency import (
+    IdempotencyStore,
+    IdempotentAgent,
+    InMemoryIdempotencyStore,
+)
 from python_ai_agents.core.tool import (
     DenyEffectfulTools,
     Tool,
@@ -157,6 +162,14 @@ class Trust:
         audit_sink: AuditSink | None = None,
     ) -> Tool:
         return GovernedTool(tool, approver or DenyEffectfulTools(), audit_sink or NullAuditSink())
+
+    @staticmethod
+    def idempotent(
+        agent: Agent,
+        store: IdempotencyStore | None = None,
+        key_attribute: str = "idempotencyKey",
+    ) -> Agent:
+        return IdempotentAgent(agent, store or InMemoryIdempotencyStore(), key_attribute)
 
 
 def _deadline_exceeded(request: AgentRequest) -> bool:

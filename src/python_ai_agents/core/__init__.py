@@ -1,10 +1,20 @@
 """Core seams and trust primitives."""
 
-from python_ai_agents.core.agent import Agent, AgentRequest, AgentResponse
-from python_ai_agents.core.audit import AuditEvent, AuditSink, SQLiteAuditSink
-from python_ai_agents.core.checkpoint import Checkpoint, CheckpointStore, SQLiteCheckpointStore
+from python_ai_agents.core.agent import Agent, AgentRequest, AgentResponse, StopCategory, StopReason
+from python_ai_agents.core.audit import AuditEvent, AuditSink, InMemoryAuditSink, SQLiteAuditSink
+from python_ai_agents.core.checkpoint import (
+    Checkpoint,
+    CheckpointStore,
+    InMemoryCheckpointStore,
+    SQLiteCheckpointStore,
+)
 from python_ai_agents.core.context import RequestContext
 from python_ai_agents.core.guardrail import Guardrail, GuardrailDecision, GuardrailStage
+from python_ai_agents.core.idempotency import (
+    IdempotencyStore,
+    IdempotentAgent,
+    InMemoryIdempotencyStore,
+)
 from python_ai_agents.core.tool import (
     DenyEffectfulTools,
     Tool,
@@ -28,9 +38,16 @@ __all__ = [
     "Guardrail",
     "GuardrailDecision",
     "GuardrailStage",
+    "IdempotencyStore",
+    "IdempotentAgent",
+    "InMemoryAuditSink",
+    "InMemoryCheckpointStore",
+    "InMemoryIdempotencyStore",
     "RequestContext",
     "SQLiteAuditSink",
     "SQLiteCheckpointStore",
+    "StopCategory",
+    "StopReason",
     "Tool",
     "ToolApprover",
     "ToolDecision",

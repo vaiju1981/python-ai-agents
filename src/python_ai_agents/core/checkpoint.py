@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,26 @@ class CheckpointStore(Protocol):
 
     async def delete(self, tenant: str, run_id: str) -> None:
         ...
+
+
+class InMemoryCheckpointStore:
+    """Bounded in-memory checkpoint store for tests and single-process demos."""
+
+    def __init__(self, max_entries: int = 10_000) -> None:
+        self.max_entries = max(1, max_entries)
+        self._entries: OrderedDict[tuple[str, str], Checkpoint] = OrderedDict()
+
+    async def load(self, tenant: str, run_id: str) -> Checkpoint | None:
+        return self._entries.get((tenant, run_id))
+
+    async def save(self, checkpoint: Checkpoint) -> None:
+        key = (checkpoint.tenant, checkpoint.run_id)
+        self._entries[key] = checkpoint
+        while len(self._entries) > self.max_entries:
+            self._entries.popitem(last=False)
+
+    async def delete(self, tenant: str, run_id: str) -> None:
+        self._entries.pop((tenant, run_id), None)
 
 
 class SQLiteCheckpointStore:
