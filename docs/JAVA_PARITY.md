@@ -15,11 +15,19 @@ keep the same philosophy, while staying Pythonic and thin over ecosystem substra
 - Observability: observer hooks, recording, redaction, and token accounting.
 - Local runtime stores: in-memory and SQLite audit/checkpoint/idempotency stores.
 - Ollama-first live smoke tests for local/cloud model substrates.
+- Recoverable workflow: thin LangGraph adapter bridging our checkpoint store to
+  LangGraph's `BaseCheckpointSaver`, with `RequestContext`/audit and interrupt/resume.
+- Built-in guardrails (zero-dep fallbacks): keyword blocklist, PII scrub, injection heuristic.
+- Ecosystem guardrail adapters: Presidio (PII), Guardrails AI (injection/content validation).
+- Token-budget enforcement over `Usage` events.
+- Pydantic structured-output helper with retry-on-validation-failure.
+- Streaming `ModelPort` seam (`StreamingModelPort` + `StreamingModelAdapter`).
+- Eval harness: `EvalCase`, `EvalRunner`, pluggable scorers.
+- DeepEval eval-scoring adapter for LLM-as-judge metrics.
 - Analytics demo: CSV/DuckDB catalog, safe SQL tools, relationship discovery, query planning.
 
 ## Port Later
 
-- Streaming, token budgets, and structured output helpers.
 - Episodic memory with tenant boundaries.
 - Replay adapters that consume recorded model/tool events.
 - RAG, skills, reflection, supervision, and deep-agent planning.

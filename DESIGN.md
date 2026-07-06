@@ -52,13 +52,22 @@ checkpointing, and audit storage.
 4. Long-agent memory: tenant/session-scoped conversation memory, history browsing,
    windowed short-term memory, and SQLite conversation persistence for local rollout.
 5. Observability: observer hooks for turn/model/tool/error/usage events, with
-   recording, redaction, and token accounting kept separate from audit.
-6. Durable local stores: SQLite checkpoint store and audit store. (Initial core
-   implementations exist.)
+   recording, redaction, and token accounting kept separate from audit. **Done.**
+6. Durable local stores: SQLite checkpoint store and audit store. **Done.**
 7. Substrate adapters: start with one real adapter, then add more. (Ollama now
-   supports both the `Agent` and `ModelPort` seams.)
-8. Analytics demo: multi-CSV import, profile, semantic model, governed tools,
-   artifact workspace, and chat/API.
+   supports both the `Agent` and `ModelPort` seams.) **Done.**
+8. Recoverable workflow: thin LangGraph adapter that bridges our `CheckpointStore`
+   to LangGraph's `BaseCheckpointSaver`, wraps a compiled graph as our `Agent`
+   protocol with `RequestContext`/audit, and supports interrupt/resume.
+   (`langgraph` optional extra.) **Done.**
+9. Smaller core improvements: built-in guardrails (keyword blocklist, PII scrub,
+   injection heuristic), token-budget enforcement over `Usage`, Pydantic
+   structured-output helper, streaming `ModelPort` seam, and eval harness.
+   Ecosystem adapters for Presidio (PII), Guardrails AI (injection), and
+   DeepEval (eval scoring) are optional extras; core built-ins are
+   zero-dependency fallbacks. **Done.**
+10. Analytics demo: multi-CSV import, profile, semantic model, governed tools,
+    artifact workspace, and chat/API.
 
 The Python port tracks `java-ai-agent` deliberately; see `docs/JAVA_PARITY.md` for the
 conversion map and sequencing.

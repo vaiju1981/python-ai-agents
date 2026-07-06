@@ -2,6 +2,7 @@
 
 from python_ai_agents.core.agent import Agent, AgentRequest, AgentResponse, StopCategory, StopReason
 from python_ai_agents.core.audit import AuditEvent, AuditSink, InMemoryAuditSink, SQLiteAuditSink
+from python_ai_agents.core.budget import BudgetAgent, BudgetObserver, TokenBudget
 from python_ai_agents.core.checkpoint import (
     Checkpoint,
     CheckpointStore,
@@ -10,7 +11,20 @@ from python_ai_agents.core.checkpoint import (
 )
 from python_ai_agents.core.context import RequestContext
 from python_ai_agents.core.default_agent import DefaultAgent
+from python_ai_agents.core.eval import (
+    ContainsScorer,
+    EvalCase,
+    EvalResult,
+    EvalRunner,
+    ExactMatchScorer,
+    Scorer,
+)
 from python_ai_agents.core.guardrail import Guardrail, GuardrailDecision, GuardrailStage
+from python_ai_agents.core.guardrails import (
+    InjectionHeuristicGuardrail,
+    KeywordBlocklistGuardrail,
+    PiiScrubGuardrail,
+)
 from python_ai_agents.core.idempotency import (
     IdempotencyStore,
     IdempotentAgent,
@@ -24,6 +38,9 @@ from python_ai_agents.core.memory import (
     Memory,
     SessionSummary,
     SQLiteConversationStore,
+    SummarizingMemory,
+    Summarizer,
+    TokenWindowedMemory,
     WindowedMemory,
 )
 from python_ai_agents.core.model import (
@@ -42,9 +59,22 @@ from python_ai_agents.core.observe import (
     RedactingObserver,
     TokenAccountingObserver,
 )
+from python_ai_agents.core.streaming import (
+    ModelChunk,
+    StreamingModelAdapter,
+    StreamingModelPort,
+)
+from python_ai_agents.core.structured import (
+    StructuredOutputError,
+    StructuredResult,
+    extract_structured,
+)
 from python_ai_agents.core.tool import (
-    AllTools,
     AllowListToolSelector,
+    AllTools,
+    ApprovalHandler,
+    ApprovalRequest,
+    ConsoleToolApprover,
     DenyEffectfulTools,
     NoopToolArgumentValidator,
     RequiredArgumentsValidator,
@@ -56,8 +86,51 @@ from python_ai_agents.core.tool import (
     ToolResult,
     ToolSelector,
     ToolSpec,
+    HumanApprovalToolApprover,
 )
 from python_ai_agents.core.trust import Trust
+
+from python_ai_agents.core.agents import agent_as_tool
+from python_ai_agents.core.deep import DeepAgent, LlmPlanner, Plan, PlanStep, Planner, StepStatus
+from python_ai_agents.core.episodic import Episode, EpisodicStore, InMemoryEpisodicStore
+from python_ai_agents.core.learn import LlmReflector, Reflection, ReflectiveAgent, Reflector
+from python_ai_agents.core.pricing import Pricing, TokenPrice
+from python_ai_agents.core.prompt import PromptTemplate
+from python_ai_agents.core.production import ProductionAgentRuntime
+from python_ai_agents.core.rag import (
+    ChunkStore,
+    Document,
+    Embedder,
+    InMemoryVectorStore,
+    Ingestor,
+    RetrievalAugmentedAgent,
+    RetrievedChunk,
+    Retriever,
+)
+from python_ai_agents.core.replay import ReplayToolExecutor
+from python_ai_agents.core.resilient import ObservingModelPort, ReplayModelPort, ResilientModelPort
+from python_ai_agents.core.skill import (
+    KeywordSkillSelector,
+    Skill,
+    SkillCatalog,
+    SkillSelector,
+    SkillfulAgent,
+    SimpleSkill,
+)
+from python_ai_agents.core.supervise import (
+    GroupChatAgent,
+    Handoff,
+    HandoffAgent,
+    KeywordRouter,
+    Manager,
+    ManagerAgent,
+    Router,
+    RoundRobinSelector,
+    SpeakerSelector,
+    SupervisorAgent,
+    Turn,
+)
+from python_ai_agents.core.tokenizer import HeuristicTokenizer, Tokenizer
 
 __all__ = [
     "Agent",
@@ -66,14 +139,26 @@ __all__ = [
     "AgentResponse",
     "AllTools",
     "AllowListToolSelector",
+    "ApprovalHandler",
+    "ApprovalRequest",
+    "ConsoleToolApprover",
+    "HumanApprovalToolApprover",
     "AuditEvent",
     "AuditSink",
+    "BudgetAgent",
+    "BudgetObserver",
     "Checkpoint",
     "CheckpointStore",
+    "ChunkStore",
+    "ContainsScorer",
     "ConversationHistory",
     "ConversationStore",
     "DefaultAgent",
     "DenyEffectfulTools",
+    "EvalCase",
+    "EvalResult",
+    "EvalRunner",
+    "ExactMatchScorer",
     "Guardrail",
     "GuardrailDecision",
     "GuardrailStage",
@@ -84,24 +169,39 @@ __all__ = [
     "InMemoryConversationStore",
     "InMemoryIdempotencyStore",
     "InMemoryMemory",
+    "InjectionHeuristicGuardrail",
+    "KeywordBlocklistGuardrail",
+    "KeywordRouter",
     "Message",
     "Memory",
+    "ModelChunk",
     "ModelPort",
     "ModelRequest",
     "ModelResponse",
     "NoopAgentObserver",
     "NoopToolArgumentValidator",
+    "PiiScrubGuardrail",
     "RequestContext",
     "RecordingObserver",
     "RedactingObserver",
     "RequiredArgumentsValidator",
     "Role",
+    "Scorer",
     "SessionSummary",
     "SQLiteAuditSink",
     "SQLiteCheckpointStore",
     "SQLiteConversationStore",
+    "SummarizingMemory",
+    "Summarizer",
     "StopCategory",
     "StopReason",
+    "StreamingModelAdapter",
+    "StreamingModelPort",
+    "StructuredOutputError",
+    "StructuredResult",
+    "TokenAccountingObserver",
+    "TokenBudget",
+    "TokenWindowedMemory",
     "Tool",
     "ToolApprover",
     "ToolArgumentValidator",
@@ -111,8 +211,55 @@ __all__ = [
     "ToolResult",
     "ToolSelector",
     "ToolSpec",
-    "TokenAccountingObserver",
     "Trust",
+    "DeepAgent",
+    "Document",
+    "Embedder",
+    "Episode",
+    "EpisodicStore",
+    "GroupChatAgent",
+    "Handoff",
+    "HandoffAgent",
+    "HeuristicTokenizer",
+    "InMemoryEpisodicStore",
+    "InMemoryVectorStore",
+    "Ingestor",
+    "KeywordSkillSelector",
+    "LlmPlanner",
+    "LlmReflector",
+    "Manager",
+    "ManagerAgent",
+    "ObservingModelPort",
+    "Plan",
+    "PlanStep",
+    "Planner",
+    "Pricing",
+    "ProductionAgentRuntime",
+    "PromptTemplate",
+    "ReplayModelPort",
+    "ReplayToolExecutor",
+    "Reflection",
+    "ReflectiveAgent",
+    "Reflector",
+    "ResilientModelPort",
+    "RetrievalAugmentedAgent",
+    "RetrievedChunk",
+    "Retriever",
+    "Router",
+    "RoundRobinSelector",
+    "Skill",
+    "SkillCatalog",
+    "SkillSelector",
+    "SkillfulAgent",
+    "SimpleSkill",
+    "SpeakerSelector",
+    "StepStatus",
+    "SupervisorAgent",
+    "TokenPrice",
+    "Tokenizer",
+    "Turn",
+    "agent_as_tool",
     "Usage",
     "WindowedMemory",
+    "extract_structured",
 ]

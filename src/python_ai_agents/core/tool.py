@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
+from uuid import uuid4
 
 from python_ai_agents.core.context import RequestContext
+
+if TYPE_CHECKING:
+    from python_ai_agents.core.model import ToolCall
 
 
 class ToolEffect(str, Enum):
@@ -135,3 +139,96 @@ class DenyEffectfulTools:
         if spec.effect == ToolEffect.EFFECTFUL:
             return ToolDecision.deny(f"effectful tool '{spec.name}' requires approval")
         return ToolDecision.allow()
+
+
+# ---------------------------------------------------------------------------
+# Human-in-the-loop approval
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalRequest:
+    """A request to approve an effectful tool call that policy did not auto-approve.
+
+    The ``approval_id`` is a unique token for this request — surfaced to a UI
+    via ``AgentObserver`` so the decision can be resolved out of band.
+    """
+
+    approval_id: str
+    call: ToolCall
+    spec: ToolSpec
+    principal: str
+    tenant: str
+
+
+class ApprovalHandler(Protocol):
+    """Decides whether an effectful tool call may run, possibly by consulting a human.
+
+    ``request_approval`` may block awaiting a human. Returning ``False``
+    declines the call: the model is told the user declined and the turn
+    continues.
+    """
+
+    async def request_approval(self, request: ApprovalRequest) -> bool:
+        ...
+
+
+@dataclass(slots=True)
+class HumanApprovalToolApprover:
+    """Escalates denied tool calls to an ``ApprovalHandler``.
+
+    The wrapped policy still gets the first decision. If it allows the call,
+    no human approval is requested. If it denies the call, the handler receives
+    an ``ApprovalRequest`` and may override the denial by returning ``True``.
+    """
+
+    handler: ApprovalHandler
+    policy: ToolApprover = DenyEffectfulTools()
+    approval_id_factory: Callable[[], str] = lambda: str(uuid4())
+
+    async def approve(
+        self,
+        spec: ToolSpec,
+        arguments: dict[str, Any],
+        context: RequestContext,
+    ) -> ToolDecision:
+        from python_ai_agents.core.model import ToolCall
+
+        decision = await self.policy.approve(spec, arguments, context)
+        if decision.allowed:
+            return decision
+
+        request = ApprovalRequest(
+            approval_id=self.approval_id_factory(),
+            call=ToolCall(name=spec.name, arguments=arguments),
+            spec=spec,
+            principal=context.principal,
+            tenant=context.tenant,
+        )
+        if await self.handler.request_approval(request):
+            return ToolDecision.allow()
+        return ToolDecision.deny("denied by the user")
+
+
+class ConsoleToolApprover:
+    """A human-in-the-loop ``ToolApprover``: prompts on stdin and permits on 'y'."""
+
+    async def approve(
+        self,
+        spec: ToolSpec,
+        arguments: dict[str, Any],
+        context: RequestContext,
+    ) -> ToolDecision:
+        import sys
+
+        print(
+            f"\n[approval] run {spec.effect.value} tool '{spec.name}'"
+            f" with args {arguments}? [y/N] ",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            line = input().strip().lower()
+            return ToolDecision.allow() if line == "y" else ToolDecision.deny("denied by the user")
+        except Exception as exc:
+            return ToolDecision.deny(f"approval prompt failed: {exc}")

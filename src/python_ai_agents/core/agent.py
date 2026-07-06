@@ -22,6 +22,7 @@ class StopReason(str, Enum):
     DEADLINE_EXCEEDED = "deadline_exceeded"
     MODEL_ERROR = "model_error"
     BUDGET_EXCEEDED = "budget_exceeded"
+    INTERRUPTED = "interrupted"
     UNKNOWN = "unknown"
 
     @property
@@ -33,12 +34,17 @@ class StopReason(str, Enum):
             StopReason.DEADLINE_EXCEEDED: StopCategory.TIMEOUT,
             StopReason.MODEL_ERROR: StopCategory.ERROR,
             StopReason.BUDGET_EXCEEDED: StopCategory.ERROR,
+            StopReason.INTERRUPTED: StopCategory.INCOMPLETE,
             StopReason.UNKNOWN: StopCategory.ERROR,
         }[self]
 
     @property
     def retryable(self) -> bool:
-        return self in {StopReason.DEADLINE_EXCEEDED, StopReason.MODEL_ERROR}
+        return self in {
+            StopReason.DEADLINE_EXCEEDED,
+            StopReason.MODEL_ERROR,
+            StopReason.INTERRUPTED,
+        }
 
     @classmethod
     def classify(cls, *, blocked: bool, stop_reason: str) -> StopReason:

@@ -23,6 +23,13 @@ langgraph = ["langgraph>=0.6"]
 litellm = ["litellm>=1.0"]
 ollama = []
 tools-jsonschema = ["jsonschema>=4.20"]
+presidio = ["presidio-analyzer>=2.2", "presidio-anonymizer>=2.2"]
+guardrails-ai = ["guardrails-ai>=0.5"]
+deepeval = ["deepeval>=1.0"]
+mcp = ["mcp>=1.0"]
+a2a = ["a2a-sdk>=0.1"]
+opentelemetry = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
+llamaindex = ["llama-index>=0.10"]
 analytics-demo = [
   "duckdb>=1.1",
   "polars>=1.0",

@@ -341,3 +341,124 @@ def _message_from_row(row) -> Message:
         tool_call_id=row[3],
         tool_name=row[4],
     )
+
+
+# ---------------------------------------------------------------------------
+# Token-windowed and summarizing memory
+# ---------------------------------------------------------------------------
+
+
+class Summarizer(Protocol):
+    """Condenses a span of conversation into a short summary.
+
+    Implementations typically call a model; tests supply a deterministic stub.
+    """
+
+    def summarize(self, messages: tuple[Message, ...]) -> str:
+        ...
+
+
+class _SummarizerAdapter:
+    """Adapts an async callable into the sync ``Summarizer`` protocol."""
+
+    def __init__(self, fn: Callable[[tuple[Message, ...]], Awaitable[str]]) -> None:
+        self._fn = fn
+
+    def summarize(self, messages: tuple[Message, ...]) -> str:
+        import anyio
+
+        return anyio.run(self._fn, messages)
+
+
+@dataclass(slots=True)
+class TokenWindowedMemory:
+    """Short-term memory bounded by an estimated token budget.
+
+    Keeps all system messages plus the most recent non-system messages whose
+    tokens fit within ``max_tokens``. More faithful to a model's context
+    window than count-based windowing.
+    """
+
+    tokenizer: "object"
+    max_tokens: int
+    _system_messages: list[Message] = field(default_factory=list)
+    _recent: deque[Message] = field(default_factory=deque)
+
+    def __post_init__(self) -> None:
+        self.max_tokens = max(1, self.max_tokens)
+
+    def add(self, message: Message) -> None:
+        if message.role == Role.SYSTEM:
+            self._system_messages.append(message)
+            return
+        self._recent.append(message)
+        while len(self._recent) > 1 and self._total_tokens() > self.max_tokens:
+            self._recent.popleft()
+
+    def history(self) -> tuple[Message, ...]:
+        return (*self._system_messages, *self._recent)
+
+    def _total_tokens(self) -> int:
+        total = 0
+        for m in self._system_messages:
+            total += self.tokenizer.count_tokens(m.content)  # type: ignore[attr-defined]
+        for m in self._recent:
+            total += self.tokenizer.count_tokens(m.content)  # type: ignore[attr-defined]
+        return total
+
+
+_SUMMARY_PREFIX = "Summary of earlier conversation:\n"
+
+
+@dataclass(slots=True)
+class SummarizingMemory:
+    """Memory that stays within a token budget by rolling older turns into a summary.
+
+    System messages and the most recent ``min_recent`` non-system messages are
+    kept verbatim; once the budget is exceeded, the oldest non-system messages
+    are folded into a running summary via the ``Summarizer``.
+    """
+
+    tokenizer: "object"
+    summarizer: Summarizer
+    max_tokens: int
+    min_recent: int = 4
+    _system_messages: list[Message] = field(default_factory=list)
+    _recent: deque[Message] = field(default_factory=deque)
+    _summary: str | None = field(default=None)
+
+    def __post_init__(self) -> None:
+        self.max_tokens = max(1, self.max_tokens)
+        self.min_recent = max(1, self.min_recent)
+
+    def add(self, message: Message) -> None:
+        if message.role == Role.SYSTEM:
+            self._system_messages.append(message)
+            return
+        self._recent.append(message)
+        while len(self._recent) > self.min_recent and self._total_tokens() > self.max_tokens:
+            self._fold(self._recent.popleft())
+
+    def history(self) -> tuple[Message, ...]:
+        result: list[Message] = list(self._system_messages)
+        if self._summary is not None:
+            result.append(Message.system(_SUMMARY_PREFIX + self._summary))
+        result.extend(self._recent)
+        return tuple(result)
+
+    def _total_tokens(self) -> int:
+        total = 0
+        for m in self._system_messages:
+            total += self.tokenizer.count_tokens(m.content)  # type: ignore[attr-defined]
+        if self._summary is not None:
+            total += self.tokenizer.count_tokens(self._summary)  # type: ignore[attr-defined]
+        for m in self._recent:
+            total += self.tokenizer.count_tokens(m.content)  # type: ignore[attr-defined]
+        return total
+
+    def _fold(self, message: Message) -> None:
+        if self._summary is not None:
+            combined: tuple[Message, ...] = (Message.system(self._summary), message)
+        else:
+            combined = (message,)
+        self._summary = self.summarizer.summarize(combined)
