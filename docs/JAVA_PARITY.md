@@ -9,6 +9,7 @@ keep the same philosophy, while staying Pythonic and thin over ecosystem substra
 - Model seams: `ModelPort`, `ModelRequest`, `ModelResponse`, `Message`, `ToolCall`.
 - Trust at the seam: `Trust.govern`, guardrails, deadlines, tool approval, audit.
 - Default runtime loop: `DefaultAgent` over model calls and governed tool calls.
+- Tool hardening: selector-enforced tools, argument validation, timeouts, framed/capped results.
 - Replay safety: typed stop reasons, retryability, idempotency keys, deterministic stores.
 - Local runtime stores: in-memory and SQLite audit/checkpoint/idempotency stores.
 - Ollama-first live smoke tests for local/cloud model substrates.

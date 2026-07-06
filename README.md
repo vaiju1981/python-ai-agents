@@ -30,7 +30,8 @@ The first core runtime slice includes:
 
 - a universal `Agent` seam;
 - a small `ModelPort` seam for chat-model adapters;
-- a `DefaultAgent` loop that can call tools through the trust/approval surface;
+- a `DefaultAgent` loop that can call selected tools through validation, approval,
+  timeout, and result-capping hooks;
 - in-memory and SQLite audit/checkpoint stores;
 - idempotency and retryability primitives for replay-safe products.
 
@@ -117,3 +118,14 @@ The default live test matrix is:
 - `ornith:latest`
 
 Normal test runs use a fake Ollama transport and do not require Ollama to be running.
+
+### Optional Tool Validation
+
+Core includes a pluggable `ToolArgumentValidator` seam and lightweight defaults. For
+full JSON Schema validation, install the optional extra:
+
+```bash
+python -m pip install -e .[tools-jsonschema]
+```
+
+Then use `python_ai_agents.adapters.JsonSchemaToolArgumentValidator`.

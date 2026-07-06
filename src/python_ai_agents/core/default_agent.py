@@ -4,10 +4,21 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+import anyio
+
 from python_ai_agents.core.agent import AgentRequest, AgentResponse
 from python_ai_agents.core.audit import AuditEvent, AuditSink, NullAuditSink
 from python_ai_agents.core.model import Message, ModelPort, ModelRequest, ModelResponse
-from python_ai_agents.core.tool import DenyEffectfulTools, Tool, ToolApprover, ToolResult
+from python_ai_agents.core.tool import (
+    AllTools,
+    DenyEffectfulTools,
+    NoopToolArgumentValidator,
+    Tool,
+    ToolApprover,
+    ToolArgumentValidator,
+    ToolResult,
+    ToolSelector,
+)
 
 
 MAX_STEPS_MESSAGE = "I couldn't finish that within my step budget. Please try rephrasing."
@@ -22,9 +33,13 @@ class DefaultAgent:
     tools: list[Tool] = field(default_factory=list)
     system_prompt: str | None = None
     max_steps: int = 8
+    tool_selector: ToolSelector = field(default_factory=AllTools)
+    argument_validator: ToolArgumentValidator = field(default_factory=NoopToolArgumentValidator)
     tool_approver: ToolApprover = field(default_factory=DenyEffectfulTools)
     audit_sink: AuditSink = field(default_factory=NullAuditSink)
+    tool_timeout_seconds: float | None = 30.0
     max_tool_result_chars: int = 8_000
+    frame_tool_results: bool = True
 
     async def run(self, request: AgentRequest) -> AgentResponse:
         history: list[Message] = []
@@ -32,8 +47,9 @@ class DefaultAgent:
             history.append(Message.system(self.system_prompt))
         history.append(Message.user(request.input))
 
-        tool_by_name = {tool.spec.name: tool for tool in self.tools}
-        tool_specs = tuple(tool.spec for tool in self.tools)
+        active_tools = self.tool_selector.select(request.input, list(self.tools), request.context)
+        tool_by_name = {tool.spec.name: tool for tool in active_tools}
+        tool_specs = tuple(tool.spec for tool in active_tools)
 
         for _step in range(max(1, self.max_steps)):
             if _deadline_exceeded(request):
@@ -49,7 +65,13 @@ class DefaultAgent:
                 history.append(Message.assistant(response.text, response.tool_calls))
                 for call in response.tool_calls:
                     result = await self._invoke_tool(call.name, call.arguments, request, tool_by_name)
-                    history.append(Message.tool_result(call.id, call.name, result.content))
+                    history.append(
+                        Message.tool_result(
+                            call.id,
+                            call.name,
+                            _tool_result_for_model(call.name, result, self.frame_tool_results),
+                        )
+                    )
                 continue
 
             return AgentResponse.completed(response.text)
@@ -65,7 +87,19 @@ class DefaultAgent:
     ) -> ToolResult:
         tool = tool_by_name.get(name)
         if tool is None:
+            await self._record(AuditEvent.now("tool.unavailable", request.context, f"tool={name}"))
             return ToolResult.failed(f"tool '{name}' is not available")
+
+        validation = await self.argument_validator.validate(tool.spec, arguments, request.context)
+        if not validation.allowed:
+            await self._record(
+                AuditEvent.now(
+                    "tool.invalid_arguments",
+                    request.context,
+                    f"tool={name} reason={validation.reason}",
+                )
+            )
+            return ToolResult.failed(validation.reason)
 
         decision = await self.tool_approver.approve(tool.spec, arguments, request.context)
         if not decision.allowed:
@@ -76,7 +110,15 @@ class DefaultAgent:
 
         await self._record(AuditEvent.now("tool.start", request.context, f"tool={name}"))
         try:
-            result = await tool.invoke(arguments, request.context)
+            result = await _invoke_with_timeout(
+                tool,
+                arguments,
+                request,
+                self.tool_timeout_seconds,
+            )
+            if result is None:
+                await self._record(AuditEvent.now("tool.timeout", request.context, f"tool={name}"))
+                return ToolResult.failed(f"tool '{name}' timed out")
         except Exception:
             await self._record(AuditEvent.now("tool.error", request.context, f"tool={name}"))
             return ToolResult.failed(f"tool '{name}' failed")
@@ -93,3 +135,27 @@ class DefaultAgent:
 def _deadline_exceeded(request: AgentRequest) -> bool:
     deadline = request.context.deadline
     return deadline is not None and datetime.now(timezone.utc) >= deadline
+
+
+async def _invoke_with_timeout(
+    tool: Tool,
+    arguments: dict[str, Any],
+    request: AgentRequest,
+    timeout_seconds: float | None,
+) -> ToolResult | None:
+    if timeout_seconds is None or timeout_seconds <= 0:
+        return await tool.invoke(arguments, request.context)
+
+    result: ToolResult | None = None
+    with anyio.move_on_after(timeout_seconds) as scope:
+        result = await tool.invoke(arguments, request.context)
+    if scope.cancel_called:
+        return None
+    return result
+
+
+def _tool_result_for_model(name: str, result: ToolResult, frame: bool) -> str:
+    if not frame:
+        return result.content
+    status = "error" if result.error else "ok"
+    return f"tool '{name}' result ({status}):\n{result.content}"
