@@ -39,6 +39,16 @@ from python_ai_agents.core.tool import Tool
 
 DEFAULT_MODELS = DEFAULT_OLLAMA_TEST_MODELS
 DEFAULT_OUTPUT_DIR = Path("model_scorecards")
+PASS_THRESHOLD = 80.0
+
+RUBRIC_WEIGHTS = {
+    "answer": 35.0,
+    "completion": 10.0,
+    "tool_selection": 20.0,
+    "tool_arguments": 20.0,
+    "tool_efficiency": 5.0,
+    "output_hygiene": 10.0,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +76,8 @@ class CaseResult:
     duration_seconds: float
     stop_reason: str
     detail: str
+    rubric: dict[str, float] = field(default_factory=dict)
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,7 +253,12 @@ async def run_case(
         {"name": call.name, "arguments": call.arguments}
         for call in observer.tool_calls
     )
-    score, max_score, passed, detail = score_case(case, output, tool_calls, stop_reason)
+    score, max_score, passed, detail, rubric, warnings = score_case(
+        case,
+        output,
+        tool_calls,
+        stop_reason,
+    )
     return CaseResult(
         name=case.name,
         category=case.category,
@@ -253,6 +270,8 @@ async def run_case(
         duration_seconds=perf_counter() - started,
         stop_reason=stop_reason,
         detail=detail,
+        rubric=rubric,
+        warnings=warnings,
     )
 
 
@@ -532,21 +551,22 @@ def score_case(
     output: str,
     tool_calls: tuple[dict[str, Any], ...],
     stop_reason: str,
-) -> tuple[float, float, bool, str]:
+) -> tuple[float, float, bool, str, dict[str, float], tuple[str, ...]]:
     max_score = case_max_score(case)
     details: list[str] = []
-    score = 0.0
+    warnings: list[str] = []
+    rubric = {name: 0.0 for name in RUBRIC_WEIGHTS}
 
     normalized_output = output.lower()
     missing_terms = [term for term in case.expected_terms if term.lower() not in normalized_output]
     if not missing_terms:
-        score += 6.0
+        rubric["answer"] = RUBRIC_WEIGHTS["answer"]
         details.append("answer terms ok")
     else:
         details.append(f"missing answer terms: {', '.join(missing_terms)}")
 
     if stop_reason == "completed":
-        score += 1.0
+        rubric["completion"] = RUBRIC_WEIGHTS["completion"]
         details.append("completed")
     else:
         details.append(f"stop_reason={stop_reason}")
@@ -554,28 +574,46 @@ def score_case(
     if case.required_tools:
         missing_tools = _missing_required_tools(case.required_tools, tool_calls)
         if not missing_tools:
-            score += 2.0
+            rubric["tool_selection"] = RUBRIC_WEIGHTS["tool_selection"]
             details.append("required tools ok")
         else:
             details.append(f"missing tools: {', '.join(missing_tools)}")
 
         if case.argument_check is None:
-            score += 1.0
+            rubric["tool_arguments"] = RUBRIC_WEIGHTS["tool_arguments"]
         else:
             ok, message = case.argument_check(tool_calls)
             if ok:
-                score += 1.0
+                rubric["tool_arguments"] = RUBRIC_WEIGHTS["tool_arguments"]
             details.append(f"arguments: {message}")
-    else:
-        score += 3.0
-        details.append("no tool required")
 
-    passed = score >= max_score * 0.8
-    return score, max_score, passed, "; ".join(details)
+        efficient, efficiency_detail = _tool_efficiency(case.required_tools, tool_calls)
+        if efficient:
+            rubric["tool_efficiency"] = RUBRIC_WEIGHTS["tool_efficiency"]
+        details.append(f"efficiency: {efficiency_detail}")
+    else:
+        if not tool_calls:
+            rubric["tool_selection"] = RUBRIC_WEIGHTS["tool_selection"]
+            rubric["tool_arguments"] = RUBRIC_WEIGHTS["tool_arguments"]
+            rubric["tool_efficiency"] = RUBRIC_WEIGHTS["tool_efficiency"]
+            details.append("no tool required")
+        else:
+            details.append(f"unexpected tools: {', '.join(call['name'] for call in tool_calls)}")
+
+    hygienic, hygiene_detail = _output_hygiene(output)
+    if hygienic:
+        rubric["output_hygiene"] = RUBRIC_WEIGHTS["output_hygiene"]
+    else:
+        warnings.append(hygiene_detail)
+    details.append(f"hygiene: {hygiene_detail}")
+
+    score = sum(rubric.values())
+    passed = score >= PASS_THRESHOLD
+    return score, max_score, passed, "; ".join(details), rubric, tuple(warnings)
 
 
 def case_max_score(case: ScorecardCase) -> float:
-    return 10.0
+    return sum(RUBRIC_WEIGHTS.values())
 
 
 def _missing_required_tools(
@@ -589,6 +627,49 @@ def _missing_required_tools(
         if actual[name] < count:
             missing.extend([name] * (count - actual[name]))
     return missing
+
+
+def _tool_efficiency(
+    required_tools: tuple[str, ...],
+    tool_calls: tuple[dict[str, Any], ...],
+) -> tuple[bool, str]:
+    required_count = len(required_tools)
+    actual_count = len(tool_calls)
+    if actual_count == 0:
+        return False, "no tool calls"
+    allowed_count = required_count + 1
+    repeated = [
+        name
+        for name, count in Counter(call["name"] for call in tool_calls).items()
+        if count > Counter(required_tools)[name] + 1
+    ]
+    if actual_count > allowed_count:
+        return False, f"too many calls ({actual_count} > {allowed_count})"
+    if repeated:
+        return False, f"repeated calls: {', '.join(repeated)}"
+    return True, "tool calls efficient"
+
+
+def _output_hygiene(output: str) -> tuple[bool, str]:
+    stripped = output.strip()
+    lower = stripped.lower()
+    if not stripped:
+        return False, "empty final answer"
+    if "<think>" not in lower and "</think>" not in lower:
+        return True, "clean final answer"
+    after_think = _text_after_last_think_block(stripped).strip()
+    if not after_think:
+        return False, "thinking trace leaked without final answer"
+    return False, "thinking trace leaked before final answer"
+
+
+def _text_after_last_think_block(text: str) -> str:
+    lower = text.lower()
+    marker = "</think>"
+    index = lower.rfind(marker)
+    if index < 0:
+        return ""
+    return text[index + len(marker):]
 
 
 def _has_numbers(
@@ -690,6 +771,8 @@ def model_result_to_dict(result: ModelResult) -> dict[str, Any]:
                 "duration_seconds": round(case.duration_seconds, 2),
                 "stop_reason": case.stop_reason,
                 "detail": case.detail,
+                "rubric": case.rubric,
+                "warnings": list(case.warnings),
                 "tool_calls": list(case.tool_calls),
                 "output": case.output,
             }
@@ -699,6 +782,7 @@ def model_result_to_dict(result: ModelResult) -> dict[str, Any]:
 
 
 def render_markdown(results: tuple[ModelResult, ...]) -> str:
+    fastest = _fastest_available_duration(results)
     lines = [
         "# Ollama Model Scorecard",
         "",
@@ -716,6 +800,23 @@ def render_markdown(results: tuple[ModelResult, ...]) -> str:
             f"{result.duration_seconds:.1f}s | {status} |"
         )
 
+    lines.extend(["", "## Speed Comparison", ""])
+    lines.extend(["| Model | Duration | Relative To Fastest |", "| --- | ---: | ---: |"])
+    for result in results:
+        if not result.available or fastest is None:
+            continue
+        ratio = result.duration_seconds / fastest if fastest else 0.0
+        lines.append(f"| `{result.model}` | {result.duration_seconds:.1f}s | {ratio:.2f}x |")
+
+    lines.extend(["", "## Rubric", ""])
+    lines.extend(["| Component | Points | Meaning |", "| --- | ---: | --- |"])
+    lines.append("| Answer correctness | 35 | Expected facts/terms appear in the final answer. |")
+    lines.append("| Completion | 10 | Agent turn completed without hitting an error/step limit. |")
+    lines.append("| Tool selection | 20 | Required tools were called, or no unexpected tools were called. |")
+    lines.append("| Tool arguments | 20 | Tool arguments matched the requested metric, dimension, SQL terms, or numeric values. |")
+    lines.append("| Tool efficiency | 5 | No excessive repeated tool calls. |")
+    lines.append("| Output hygiene | 10 | Final answer is clean: no visible `<think>` trace and not empty. |")
+
     lines.extend(["", "## Case Details", ""])
     for result in results:
         lines.append(f"### {result.model}")
@@ -725,16 +826,17 @@ def render_markdown(results: tuple[ModelResult, ...]) -> str:
         lines.extend(
             [
                 "",
-                "| Case | Category | Score | Tools | Detail |",
-                "| --- | --- | ---: | --- | --- |",
+                "| Case | Category | Score | Tools | Warnings | Detail |",
+                "| --- | --- | ---: | --- | --- | --- |",
             ]
         )
         for case in result.cases:
             tools = ", ".join(call["name"] for call in case.tool_calls) or "-"
             mark = "PASS" if case.passed else "FAIL"
+            warnings = ", ".join(case.warnings) or "-"
             lines.append(
                 f"| {case.name} | {case.category} | {case.score:.1f}/{case.max_score:.1f} "
-                f"{mark} | {tools} | {case.detail} |"
+                f"{mark} | {tools} | {warnings} | {case.detail} |"
             )
         lines.append("")
     lines.extend(["## Selection Heuristic", ""])
@@ -750,6 +852,11 @@ def render_markdown(results: tuple[ModelResult, ...]) -> str:
         "final answer looks plausible."
     )
     return "\n".join(lines)
+
+
+def _fastest_available_duration(results: tuple[ModelResult, ...]) -> float | None:
+    durations = [result.duration_seconds for result in results if result.available and not result.error]
+    return min(durations) if durations else None
 
 
 if __name__ == "__main__":

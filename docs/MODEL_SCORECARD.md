@@ -33,15 +33,41 @@ Each case scores final answer terms, completion, required tool calls, and
 important tool arguments. For analytics selection, treat missing required tool
 calls as blockers even when the model gives a plausible-sounding answer.
 
+## Detailed Rubric
+
+Each case is scored out of 100:
+
+| Component | Points | Meaning |
+| --- | ---: | --- |
+| Answer correctness | 35 | Expected facts/terms appear in the final answer. |
+| Completion | 10 | Agent turn completed without hitting an error/step limit. |
+| Tool selection | 20 | Required tools were called, or no unexpected tools were called. |
+| Tool arguments | 20 | Tool arguments matched the requested metric, dimension, SQL terms, or numeric values. |
+| Tool efficiency | 5 | No excessive repeated tool calls. |
+| Output hygiene | 10 | Final answer is clean: no visible `<think>` trace and not empty. |
+
+The output hygiene row is intentionally strict. Some models, especially
+`hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0`, may return valid tool calls
+while leaving the user-visible response inside `<think>...</think>` or failing
+to produce a final answer after tools complete. That is scored separately from
+tool-call correctness because it is a product-demo failure even when the tool
+arguments are correct.
+
 ## Current Run
 
-Latest run: `model_scorecards/ollama_model_scorecard_20260706T231448Z.md`
+Latest run: `model_scorecards/ollama_model_scorecard_20260706T232238Z.md`
 
-| Model | Score | Read |
-| --- | ---: | --- |
-| `ornith:latest` | `80/80` | Best production-demo candidate. Perfect across simple, memory, tool, multi-tool, and analytics cases. Slower than the other two. |
-| `gemma4:31b-cloud` | `74/80` | Strong general fallback. Fastest in this run and excellent at tool arguments, but missed one numeric detail after a complex SQL-style tool. |
-| `hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0` | `52/80` | Useful for narrow tool-call experiments, but not ready as the flagship analytics-demo model: it often called tools yet failed to synthesize the final answer. |
+| Model | Score | Duration | Read |
+| --- | ---: | ---: | --- |
+| `ornith:latest` | `800/800` | `66.9s` | Best production-demo candidate. Perfect across simple, memory, tool, multi-tool, analytics, and SQL-style cases. |
+| `gemma4:31b-cloud` | `765/800` | `21.1s` | Strong fast fallback. Excellent tool arguments and clean output, but missed one numeric detail after a complex SQL-style tool. |
+| `hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0` | `510/800` | `41.7s` | Useful for tool-call stress testing. It often called tools correctly, but leaked `<think>` traces and failed to synthesize final answers after tools. |
+
+In the latest run, `ornith:latest` was `3.18x` slower than
+`gemma4:31b-cloud` (`66.9s` vs `21.1s`). The previous captured run showed a
+wider spread (`94.1s` vs `10.3s`, about `9.1x`), so treat latency as workload
+and service-state dependent. Accuracy still favors `ornith:latest` for the
+flagship demo.
 
 ## Recommendation
 
