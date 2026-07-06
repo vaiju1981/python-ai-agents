@@ -50,7 +50,7 @@ checkpointing, and audit storage.
 3. Tool hardening: selected-tools enforcement, argument validation seams, per-tool
    timeout, and framed/capped tool results.
 4. Long-agent memory: tenant/session-scoped conversation memory, history browsing,
-   and windowed short-term memory.
+   windowed short-term memory, and SQLite conversation persistence for local rollout.
 5. Durable local stores: SQLite checkpoint store and audit store. (Initial core
    implementations exist.)
 6. Substrate adapters: start with one real adapter, then add more. (Ollama now

@@ -23,6 +23,7 @@ from python_ai_agents.core.memory import (
     InMemoryMemory,
     Memory,
     SessionSummary,
+    SQLiteConversationStore,
     WindowedMemory,
 )
 from python_ai_agents.core.model import (
@@ -87,6 +88,7 @@ __all__ = [
     "SessionSummary",
     "SQLiteAuditSink",
     "SQLiteCheckpointStore",
+    "SQLiteConversationStore",
     "StopCategory",
     "StopReason",
     "Tool",

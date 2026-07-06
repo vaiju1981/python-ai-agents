@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import AsyncContextManager, AsyncIterator, Callable, Protocol
 
 import anyio
 
-from python_ai_agents.core.model import Message, Role
+from python_ai_agents.core.model import Message, Role, ToolCall
 
 
 class Memory(Protocol):
@@ -156,3 +159,185 @@ class InMemoryConversationStore:
             if victim is None:
                 return
             self._entries.pop(victim, None)
+
+
+class SQLiteConversationStore:
+    """SQLite-backed conversation store for local durable rollouts."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._locks: dict[tuple[str, str], anyio.Lock] = {}
+        self._locks_lock = anyio.Lock()
+        self._initialize()
+
+    @asynccontextmanager
+    async def memory(self, tenant: str, session_id: str) -> AsyncIterator[Memory]:
+        key = (tenant, session_id)
+        async with self._locks_lock:
+            lock = self._locks.get(key)
+            if lock is None:
+                lock = anyio.Lock()
+                self._locks[key] = lock
+
+        async with lock:
+            memory = InMemoryMemory()
+            for message in await anyio.to_thread.run_sync(self.messages, tenant, session_id):
+                memory.add(message)
+            before = len(memory.history())
+            yield memory
+            after_messages = memory.history()[before:]
+            if after_messages:
+                await anyio.to_thread.run_sync(
+                    self._append_messages,
+                    tenant,
+                    session_id,
+                    after_messages,
+                )
+            else:
+                await anyio.to_thread.run_sync(self._touch_session, tenant, session_id)
+
+    def list_sessions(self, tenant: str) -> list[SessionSummary]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT session_id, COUNT(*) AS message_count, MAX(created_at) AS last_activity
+                FROM conversation_messages
+                WHERE tenant = ?
+                GROUP BY session_id
+                ORDER BY last_activity DESC
+                """,
+                (tenant,),
+            ).fetchall()
+        return [
+            SessionSummary(
+                session_id=row[0],
+                message_count=int(row[1]),
+                last_activity=datetime.fromisoformat(row[2]),
+            )
+            for row in rows
+        ]
+
+    def messages(self, tenant: str, session_id: str) -> tuple[Message, ...]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT role, content, tool_calls_json, tool_call_id, tool_name
+                FROM conversation_messages
+                WHERE tenant = ? AND session_id = ?
+                ORDER BY ordinal ASC
+                """,
+                (tenant, session_id),
+            ).fetchall()
+        return tuple(_message_from_row(row) for row in rows)
+
+    def delete(self, tenant: str, session_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM conversation_messages WHERE tenant = ? AND session_id = ?",
+                (tenant, session_id),
+            )
+
+    def _initialize(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversation_messages (
+                    tenant TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    tool_calls_json TEXT NOT NULL,
+                    tool_call_id TEXT,
+                    tool_name TEXT,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (tenant, session_id, ordinal)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_conversation_messages_session
+                ON conversation_messages(tenant, session_id, ordinal)
+                """
+            )
+
+    def _append_messages(
+        self,
+        tenant: str,
+        session_id: str,
+        messages: tuple[Message, ...],
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(MAX(ordinal), -1)
+                FROM conversation_messages
+                WHERE tenant = ? AND session_id = ?
+                """,
+                (tenant, session_id),
+            ).fetchone()
+            next_ordinal = int(row[0]) + 1
+            conn.executemany(
+                """
+                INSERT INTO conversation_messages (
+                    tenant, session_id, ordinal, role, content, tool_calls_json,
+                    tool_call_id, tool_name, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        tenant,
+                        session_id,
+                        next_ordinal + index,
+                        message.role.value,
+                        message.content,
+                        json.dumps([_tool_call_to_json(call) for call in message.tool_calls]),
+                        message.tool_call_id,
+                        message.tool_name,
+                        now,
+                    )
+                    for index, message in enumerate(messages)
+                ],
+            )
+
+    def _touch_session(self, tenant: str, session_id: str) -> None:
+        # No-op placeholder for stores that track session metadata separately.
+        return None
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.path)
+
+
+def _tool_call_to_json(call: ToolCall) -> dict[str, object]:
+    return {"id": call.id, "name": call.name, "arguments": call.arguments}
+
+
+def _tool_call_from_json(value: object) -> ToolCall:
+    if not isinstance(value, dict):
+        raise ValueError("tool call payload must be an object")
+    name = value.get("name")
+    if not isinstance(name, str):
+        raise ValueError("tool call payload is missing a name")
+    arguments = value.get("arguments", {})
+    if not isinstance(arguments, dict):
+        raise ValueError("tool call arguments must be an object")
+    call_id = value.get("id")
+    return ToolCall(name=name, arguments=arguments, id=call_id if isinstance(call_id, str) else "")
+
+
+def _message_from_row(row) -> Message:
+    role = Role(row[0])
+    content = row[1]
+    tool_calls_payload = json.loads(row[2])
+    if not isinstance(tool_calls_payload, list):
+        raise ValueError("stored tool calls payload must be a list")
+    return Message(
+        role=role,
+        content=content,
+        tool_calls=tuple(_tool_call_from_json(call) for call in tool_calls_payload),
+        tool_call_id=row[3],
+        tool_name=row[4],
+    )

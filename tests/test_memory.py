@@ -8,6 +8,7 @@ from python_ai_agents import (
     ModelRequest,
     ModelResponse,
     RequestContext,
+    SQLiteConversationStore,
     WindowedMemory,
 )
 
@@ -102,6 +103,42 @@ def test_in_memory_conversation_store_lists_deletes_and_evicts() -> None:
         assert [session.session_id for session in store.list_sessions("tenant-a")] == ["session-2"]
 
         store.delete("tenant-a", "session-2")
+        assert store.list_sessions("tenant-a") == []
+
+    anyio.run(run)
+
+
+def test_sqlite_conversation_store_persists_across_instances(tmp_path) -> None:
+    async def run() -> None:
+        path = tmp_path / "conversation.sqlite3"
+        store = SQLiteConversationStore(path)
+        agent = DefaultAgent(MemoryEchoModel(), conversation_store=store)
+        context = RequestContext(session_id="session-1", tenant="tenant-a")
+
+        await agent.run(AgentRequest("first", context))
+        await agent.run(AgentRequest("second", context))
+
+        restored = SQLiteConversationStore(path)
+        assert restored.messages("tenant-a", "session-1") == (
+            Message.user("first"),
+            Message.assistant("first"),
+            Message.user("second"),
+            Message.assistant("first / second"),
+        )
+        assert [session.session_id for session in restored.list_sessions("tenant-a")] == ["session-1"]
+
+    anyio.run(run)
+
+
+def test_sqlite_conversation_store_deletes_session(tmp_path) -> None:
+    async def run() -> None:
+        store = SQLiteConversationStore(tmp_path / "conversation.sqlite3")
+
+        async with store.memory("tenant-a", "session-1") as memory:
+            memory.add(Message.user("hello"))
+        store.delete("tenant-a", "session-1")
+
+        assert store.messages("tenant-a", "session-1") == ()
         assert store.list_sessions("tenant-a") == []
 
     anyio.run(run)
