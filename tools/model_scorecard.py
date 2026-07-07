@@ -47,12 +47,17 @@ DEFAULT_OUTPUT_DIR = Path("model_scorecards")
 PASS_THRESHOLD = 80.0
 MAX_OLLAMA_CONTEXT = 65_536
 
-# Real-data suite: a 1.3M-row × 73-column casino asset table with trap columns
-# (coinIn vs coinInCarded, netWin vs grossWin vs theoWin) that punish schema-navigation
-# mistakes. Opt in with `--dataset redrock`.
+# Real-data suite: three related casino tables (11.5M rows, ~170 columns total) with trap
+# columns (coinIn vs coinInCarded, netWin vs grossWin vs theoWin) AND cross-table joins
+# (sessions bridges players<->machines) that punish schema-navigation mistakes. This is
+# what actually separates a 9B from a 31B. Opt in with `--dataset redrock`.
 REDROCK_DEFAULT_DIR = "/Users/vaijanath.rao/ga_cache/training_data"
-REDROCK_FILE = "STATION_assetDaily_REDROCK.csv"
-REDROCK_TABLE = "asset_daily"
+REDROCK_FILES = {
+    "asset_daily": "STATION_assetDaily_REDROCK.csv",  # machine-day performance (assetId)
+    "player_visits": "STATION_playerVisits_REDROCK.csv",  # player demographics (playerId)
+    "sessions": "STATION_sessions_REDROCK.csv",  # bridge: has BOTH playerId and assetId
+}
+REDROCK_TABLE = "asset_daily"  # primary machine table for the single-table cases
 REDROCK_MAX_TRAIN_ROWS = 50_000
 
 RUBRIC_WEIGHTS = {
@@ -332,18 +337,22 @@ def build_demo_dataset() -> tuple[CsvSource, SemanticModel]:
 
 
 def build_redrock_dataset(redrock_dir: str) -> tuple[CsvSource, SemanticModel]:
-    """Import the real casino asset table into a file-backed DuckDB (out-of-core) once.
+    """Import all three real casino tables into a file-backed DuckDB (out-of-core) once.
 
-    ~960MB / 1.3M rows / 73 columns — imports in seconds, then every case queries it
-    read-only. The rich, trap-heavy schema is the point: it is what actually separates a
-    9B model from a 31B one.
+    ~4.7GB / 11.5M rows across asset_daily, player_visits, and sessions — imports in ~1min,
+    then every case queries it read-only. Loading all three is what makes cross-table
+    questions ("what kind of players play the top machines") answerable: `sessions` bridges
+    `player_visits` (playerId -> demographics) and machines (assetId/gameTitle). The wide,
+    3-table, trap-heavy schema is the point — it is what actually separates a 9B from a 31B.
     """
-    csv_path = Path(redrock_dir) / REDROCK_FILE
-    if not csv_path.exists():
-        raise SystemExit(f"REDROCK data not found: {csv_path}")
+    base = Path(redrock_dir)
+    named = {table: base / filename for table, filename in REDROCK_FILES.items()}
+    missing = [str(p) for p in named.values() if not p.exists()]
+    if missing:
+        raise SystemExit("REDROCK data not found:\n  " + "\n  ".join(missing))
     tmp_dir = tempfile.TemporaryDirectory()
     db_path = Path(tmp_dir.name) / "redrock.duckdb"
-    source = CsvSource(db_path=str(db_path), named_csvs={REDROCK_TABLE: csv_path})
+    source = CsvSource(db_path=str(db_path), named_csvs=named)
     source._scorecard_tmp_dir = tmp_dir  # type: ignore[attr-defined]
     profile = profile_dataset(source)
     semantic = SemanticModel.from_profile(profile)
@@ -614,6 +623,27 @@ def _ground_truth_redrock(source: CsvSource) -> dict[str, str]:
     top_game = q(
         f"SELECT gameTitle g FROM {t} GROUP BY 1 ORDER BY SUM(theoWin) DESC LIMIT 1"
     )[0]["g"]
+
+    # --- cross-table ground truth (needs all three tables joined) ---
+    chairman = q(
+        "SELECT clubLevel c FROM player_visits GROUP BY 1 ORDER BY SUM(coinIn) DESC LIMIT 1"
+    )[0]["c"]
+    top_state = q(
+        "SELECT state s FROM player_visits GROUP BY 1 "
+        "ORDER BY COUNT(DISTINCT playerId) DESC LIMIT 1"
+    )[0]["s"]
+    top_game_ci = q(
+        "SELECT gameTitle g FROM sessions GROUP BY 1 ORDER BY SUM(coinIn) DESC LIMIT 1"
+    )[0]["g"]
+    game_lit = str(top_game_ci).replace("'", "''")
+    # ageGroup bracket numbers drift per player, so dedupe to one label per player, then
+    # match on the stable generation name (Gen X / Millennials / ...), not the bracket.
+    top_gen_label = q(
+        "WITH pdim AS (SELECT playerId, MAX(ageGroup) ag FROM player_visits GROUP BY 1) "
+        "SELECT p.ag ag FROM sessions s JOIN pdim p ON s.playerId = p.playerId "
+        f"WHERE s.gameTitle = '{game_lit}' GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1"
+    )[0]["ag"]
+    gen = str(top_gen_label).split(")")[-1].strip().lower()  # "(42-57) Gen X" -> "gen x"
     return {
         "top_mfr_1": str(top2_mfr[0]["m"]),
         "top_mfr_2": str(top2_mfr[1]["m"]),
@@ -625,6 +655,10 @@ def _ground_truth_redrock(source: CsvSource) -> dict[str, str]:
         "top_zone": str(top_zone),
         "leased_winner": "leased" if lease.get(True, 0.0) > lease.get(False, 0.0) else "owned",
         "top_game_theowin": str(top_game).lower(),
+        "chairman_club": str(chairman),
+        # ponytail: winner is NV; map the one code to its name so "Nevada" matches cleanly.
+        "top_state": "nevada" if str(top_state) == "NV" else str(top_state).lower(),
+        "top_game_generation": f"{gen}|generation x" if "gen x" in gen else gen,
     }
 
 
@@ -703,6 +737,34 @@ def build_redrock_cases(source: CsvSource) -> tuple[ScorecardCase, ...]:
             ),
             tool_groups=(),
             notes="Honesty: must refuse to claim causation from observational data.",
+        ),
+        # --- cross-table cases: the reason all three tables are loaded ---
+        ScorecardCase(
+            name="club_level_top_coinin",
+            category="redrock-join",
+            prompt="Which player club level accounts for the most total coin-in?",
+            expected_terms=(gt["chairman_club"],),
+            tool_groups=(("run_sql", "run_query"),),
+            notes="Must find the player_visits table (not asset_daily/sessions) for club level.",
+        ),
+        ScorecardCase(
+            name="top_game_player_generation",
+            category="redrock-join",
+            prompt=(
+                "For the game title with the highest total coin-in, which age group of "
+                "players plays it the most?"
+            ),
+            expected_terms=(gt["top_game_generation"],),
+            tool_groups=(("run_sql", "run_query"),),
+            notes="Multi-hop join: top game (sessions) -> players by playerId -> dominant age group.",
+        ),
+        ScorecardCase(
+            name="top_player_state",
+            category="redrock-join",
+            prompt="Which U.S. state are most of the players from? Give the state name.",
+            expected_terms=(gt["top_state"],),
+            tool_groups=(("run_sql", "run_query"),),
+            notes="player_visits demographics: COUNT(DISTINCT playerId) by state.",
         ),
     )
 
@@ -864,10 +926,12 @@ def render_markdown(results: tuple[ModelResult, ...], dataset: str = "synthetic"
     fastest = _fastest_available_duration(results)
     if dataset == "redrock":
         data_note = (
-            "Dataset: **real casino asset data** (`STATION_assetDaily_REDROCK.csv`, ~1.3M rows "
-            "× 73 columns) imported into a file-backed DuckDB. The schema has trap columns "
-            "(coinIn vs coinInCarded; netWin vs grossWin vs theoWin) that punish column-picking "
-            "mistakes — this is the hard suite meant to separate a 9B from a 31B model."
+            "Dataset: **real casino data**, three related tables (~11.5M rows, ~170 columns) — "
+            "`asset_daily` (machines), `player_visits` (player demographics), and `sessions` "
+            "(the bridge with both playerId and assetId) — in a file-backed DuckDB. It has trap "
+            "columns (coinIn vs coinInCarded; netWin vs grossWin vs theoWin) AND cross-table "
+            "joins (which players play the top machines). This is the hard suite meant to "
+            "separate a 9B from a 31B model."
         )
     else:
         data_note = (
