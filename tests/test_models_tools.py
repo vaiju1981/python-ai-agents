@@ -127,3 +127,25 @@ def test_build_model_caches_then_retrains_on_request(tmp_path):
     assert first["cached"] is False  # trained
     assert second["cached"] is True  # served from the store, not retrained
     assert forced["cached"] is False  # explicit retrain bypasses the cache
+
+
+def test_training_uses_full_table_by_default_and_honors_user_cap(tmp_path):
+    csv = tmp_path / "s.csv"
+    rng = np.random.default_rng(2)
+    lines = ["x,y"]
+    for i in range(500):
+        lines.append(f"{i},{round(2 * i + rng.normal(0, 1), 2)}")
+    csv.write_text("\n".join(lines) + "\n")
+
+    src = CsvSource(named_csvs={"s": csv})
+    semantic = SemanticModel.from_profile(profile_dataset(src))
+
+    full = _call(ModelsToolset(src, semantic).build_model(), {"target": "y", "predictors": ["x"]})
+    capped = _call(
+        ModelsToolset(src, semantic, max_train_rows=50).build_model(),
+        {"target": "y", "predictors": ["x"]},
+    )
+    src.close()
+
+    assert full["n_rows"] == 500  # default: the whole table, no artificial cap
+    assert capped["n_rows"] == 50  # user's cap is honored, and reported

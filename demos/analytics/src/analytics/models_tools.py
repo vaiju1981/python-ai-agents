@@ -31,8 +31,6 @@ from demos.analytics.src.analytics.toolset import (
 from python_ai_agents.core.tool import Tool, ToolResult
 
 _MIN_ROWS = 20
-# Cap the rows pulled into pandas/sklearn for training; larger tables are sampled.
-_MAX_TRAIN_ROWS = 100_000
 
 
 class ModelsToolset:
@@ -46,12 +44,16 @@ class ModelsToolset:
         store: ModelStore | None = None,
         dataset_sig: str = "",
         model_ttl: float | None = None,
+        max_train_rows: int | None = None,
     ) -> None:
         self.source = source
         self.model = model
         self.store = store
         self.dataset_sig = dataset_sig
         self.model_ttl = model_ttl
+        # None = train on the full table (the default). A positive value caps rows
+        # (reservoir sample) so the user can trade accuracy for speed on big data.
+        self.max_train_rows = max_train_rows
 
     # -- tool registry --------------------------------------------------------
 
@@ -532,17 +534,16 @@ class ModelsToolset:
                 return tc
         return None
 
-    def _frame(self, table: str, columns: list[str]) -> Any:
+    def _frame(self, table: str, columns: list[str], max_rows: int | None = None) -> Any:
         import pandas as pd
 
+        cap = max_rows if max_rows is not None else self.max_train_rows
         select = ", ".join(sql_qcol(table, c) for c in columns)
         where = " AND ".join(f"{sql_qcol(table, c)} IS NOT NULL" for c in columns)
-        # Cap rows pulled into pandas so training stays in memory on large tables.
-        # USING SAMPLE returns everything when the table is smaller than the cap.
-        sql = (
-            f"SELECT * FROM (SELECT {select} FROM {sql_quote(table)} WHERE {where}) "
-            f"USING SAMPLE {_MAX_TRAIN_ROWS} ROWS"
-        )
+        sql = f"SELECT {select} FROM {sql_quote(table)} WHERE {where}"
+        if cap:
+            # User opted to cap training rows; reservoir-sample so it fits in memory.
+            sql = f"SELECT * FROM ({sql}) USING SAMPLE {int(cap)} ROWS"
         return pd.DataFrame(self.source.native_query(sql))
 
     @staticmethod

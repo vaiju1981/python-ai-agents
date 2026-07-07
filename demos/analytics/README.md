@@ -29,8 +29,13 @@ ANALYTICS_MODEL_PROVIDER=ollama ANALYTICS_MODEL=ornith:latest \
   - *Descriptive:* `run_query`, `trend`, `compare`, `summarize`, `correlate`,
     `outliers`, `regression`, `run_sql`.
   - *Predictive & causal:* `build_model`, `forecast`, `ab_test`, `causal_effect`,
-    `uplift`, `cluster`, `anomaly_detection` — each reports its method and sample
-    size; causal/uplift carry an explicit "not proof of causation" caveat.
+    `uplift`, `cluster`, `anomaly_detection` — each reports its method and the
+    number of rows it used; causal/uplift carry an explicit "not proof of
+    causation" caveat.
+- **Scale** — descriptive answers/insights run as SQL over the *full* table
+  (exact). ML tools also use the full table **by default**; on very large data you
+  can cap the training rows via the sidebar ("Max ML training rows", 0 = all) to
+  trade accuracy for speed. The chosen count is always reported.
 - **SQL tab** — a read-only DuckDB escape hatch, with an automatic chart.
 - **Optional** (off by default) — an LLM pass to relabel column roles.
 

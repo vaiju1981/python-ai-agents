@@ -132,13 +132,13 @@ def _load_dataset(named_csvs: dict[str, Path], sig: tuple, tmp_dir: Path, *, ref
     st.session_state.pop("agent", None)  # force agent rebuild against new data
 
 
-def _ensure_agent(provider: str, model_name: str) -> None:
+def _ensure_agent(provider: str, model_name: str, max_train_rows: int | None) -> None:
     """Build the agent once per (dataset, model); reuse it across questions.
 
     A persistent ``_RowCapture`` observer rides along so the chat can chart the
     rows behind each answer; it is reset before every question.
     """
-    model_sig = (st.session_state.get("data_sig"), provider, model_name)
+    model_sig = (st.session_state.get("data_sig"), provider, model_name, max_train_rows)
     if st.session_state.get("model_sig") == model_sig and "agent" in st.session_state:
         return
     capture = _RowCapture()
@@ -151,6 +151,7 @@ def _ensure_agent(provider: str, model_name: str) -> None:
         observers=[capture],
         model_store=store,
         dataset_sig=str(st.session_state.data_sig),
+        max_train_rows=max_train_rows,
     )
     st.session_state.model_sig = model_sig
 
@@ -172,6 +173,13 @@ def main() -> None:
             "LLM schema refinement (slower)",
             value=False,
             help="Deterministic profiling is used by default; enable for an LLM relabel pass.",
+        )
+        max_train_rows = st.number_input(
+            "Max ML training rows (0 = all)",
+            min_value=0,
+            value=0,
+            step=10_000,
+            help="Rows ML tools train on; 0 = the full table (slower on big data).",
         )
 
         st.divider()
@@ -221,7 +229,7 @@ def main() -> None:
         st.info("Upload one or more CSV files to get started.")
         return
 
-    _ensure_agent(provider, model_name)
+    _ensure_agent(provider, model_name, int(max_train_rows) or None)
     profile = st.session_state.profile
     semantic = st.session_state.semantic
     source = st.session_state.source
