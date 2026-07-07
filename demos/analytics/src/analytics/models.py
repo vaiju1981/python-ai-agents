@@ -11,7 +11,8 @@ import os
 from python_ai_agents.adapters import OllamaModelPort
 from python_ai_agents.core.model import ModelPort
 
-MAX_OLLAMA_CONTEXT = 65_536
+MAX_OLLAMA_CONTEXT = 131_072
+DEFAULT_OLLAMA_CONTEXT = 65_536
 
 
 def from_env() -> ModelPort:
@@ -19,8 +20,9 @@ def from_env() -> ModelPort:
 
     Required: ``ANALYTICS_MODEL_PROVIDER`` (e.g. "ollama") and
     ``ANALYTICS_MODEL`` (e.g. "ornith:latest").
-    Optional: ``OLLAMA_BASE_URL`` (default ``http://localhost:11434``) and
-    ``OLLAMA_NUM_CTX`` (default/max ``65536``).
+    Optional: ``OLLAMA_BASE_URL`` (default ``http://localhost:11434``),
+    ``OLLAMA_NUM_CTX`` (default ``65536``, max ``131072``), and sampling overrides
+    ``OLLAMA_TEMPERATURE`` / ``OLLAMA_TOP_P`` / ``OLLAMA_TOP_K``.
     """
     provider = os.environ.get("ANALYTICS_MODEL_PROVIDER", "")
     model_name = os.environ.get("ANALYTICS_MODEL", "")
@@ -42,8 +44,14 @@ def from_env() -> ModelPort:
 
 
 def _ollama_options() -> dict[str, int | float]:
-    requested_ctx = int(os.environ.get("OLLAMA_NUM_CTX", MAX_OLLAMA_CONTEXT))
+    # Sampling defaults follow the local model's vendor guidance (temp 1.0, top_p 0.95,
+    # top_k 20): benchmarked 2026-07-07, temperature 0 makes ornith repeat tool calls
+    # until it hits the step budget on open-ended prompts; these settings fixed that
+    # with no loss on exact-answer cases. Override per model via env.
+    requested_ctx = int(os.environ.get("OLLAMA_NUM_CTX", DEFAULT_OLLAMA_CONTEXT))
     return {
-        "temperature": 0,
+        "temperature": float(os.environ.get("OLLAMA_TEMPERATURE", 1.0)),
+        "top_p": float(os.environ.get("OLLAMA_TOP_P", 0.95)),
+        "top_k": int(os.environ.get("OLLAMA_TOP_K", 20)),
         "num_ctx": min(requested_ctx, MAX_OLLAMA_CONTEXT),
     }

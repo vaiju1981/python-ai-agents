@@ -56,6 +56,10 @@ same on every push/PR.
   retrain on data change, TTL, or explicit request. Full plan, incl. drift /
   scheduled retrain / `predict` serving / MLflow adapter, in
   [MODEL_LIFECYCLE.md](MODEL_LIFECYCLE.md).
+- **Sampling defaults:** vendor-recommended (temp 1.0, top_p 0.95, top_k 20) —
+  temperature 0 made the local model repeat tool calls into the step budget on
+  open-ended prompts (benchmarked on real data). Override via `OLLAMA_TEMPERATURE`
+  / `OLLAMA_TOP_P` / `OLLAMA_TOP_K`; context via `OLLAMA_NUM_CTX` (≤131072).
 
 ## Deferred (by request)
 
