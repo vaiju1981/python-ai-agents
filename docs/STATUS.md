@@ -6,11 +6,12 @@ _Last updated: 2026-07-06._
 
 `python_ai_agents` core is a thin, composing trust/runtime layer. The analytics
 demo is a truthful, governed NL-analytics app with descriptive **and** predictive
-tools. The **core is now production-hardened** (P0–P3 closed, `mypy --strict`
-clean, CI gate). The remaining work is the **demo's multi-user hardening (P1)**.
+tools. The **core is production-hardened** (P0–P3 closed, `mypy --strict` clean,
+CI gate) and the **demo is hardened** (structured charts, resource cleanup, NL
+eval). Only auth / multi-user hosting is deferred by request.
 
 Local gate (conda `mlv2Py3`, Python 3.10): `ruff check` + `ruff format --check` +
-`mypy` (0 issues) + `pytest` (**187 passed, 21 skipped**), all green. CI runs the
+`mypy` (0 issues) + `pytest` (**188 passed, 22 skipped**), all green. CI runs the
 same on every push/PR.
 
 ## Core — DONE
@@ -38,14 +39,22 @@ same on every push/PR.
 - Real Plotly charts (Insights, Chat, SQL); deterministic on-load insights.
 - Truthful copy and dependencies.
 
-## Remaining — Demo multi-user hardening (P1, in progress)
+## Demo hardening — DONE
 
-| Pri | Gap | Plan |
-|-----|-----|------|
-| P1 | No auth / multi-user isolation (single-process Streamlit) | Add login + per-user session scoping. |
-| P1 | No durable per-user persistence (data + catalog live in a tempdir, lost on restart) | Per-user persistent DuckDB file + saved catalog; cleanup on session end. |
-| P2 | Chat charts are best-effort (regex-extract JSON from tool text) | Structured tool-result channel so chart data is exact. |
-| P2 | No NL→tool accuracy eval for the demo | Wire the core eval harness over a fixed question set. |
+- **Structured chart channel:** `ToolResult` carries an optional `data` payload
+  (never sent to the model); row-returning tools attach their rows and the app
+  charts them exactly — no more best-effort text parsing.
+- **Resource cleanup:** re-import (and `mkdtemp`) only when the upload changes;
+  the prior dataset's DuckDB connection + tempdir are reclaimed on load (fixes a
+  per-rerun tempdir leak).
+- **NL→tool eval:** gated (`PAA_RUN_OLLAMA_TESTS`) test wiring the core
+  `EvalRunner` over the analytics agent, as a regression guard on answer quality.
+
+## Deferred (by request)
+
+- **Auth / multi-user isolation and durable per-user persistence.** The demo runs
+  single-user; uploaded data lives for the session. Add authentication and a
+  per-user store when hosting it as a shared service.
 
 ## Run / verify (env: conda `mlv2Py3`, Python 3.10)
 
