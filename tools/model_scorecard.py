@@ -683,9 +683,10 @@ def _ground_truth_redrock(source: CsvSource) -> dict[str, str]:
         "top_mfr_2": str(top2_mfr[1]["m"]),
         "distinct_titles": str(n_titles),
         "konami_payback": str(round(konami_pb)),
-        # netWin/coinIn = 5.97 here; grossWin or theoWin numerators give a different number,
-        # so precise digits (not a bare rounded "6") are what prove the right column.
-        "hold_terms": f"{hold:.2f}|{hold:.1f}|5.9",
+        # netWin/coinIn = 5.97 here. Accept precise (5.97/6.0/5.9) AND the rounded "6%" a
+        # model may legitimately give — grossWin (6.38) prints as "6.4%"/"6.38%", not "6%",
+        # so accepting "6%" barely dents the trap while not failing a correct rounded answer.
+        "hold_terms": f"{hold:.2f}|{hold:.1f}|5.9|{round(hold)}%|{round(hold)} percent",
         "top_zone": str(top_zone),
         "leased_winner": "leased" if lease.get(True, 0.0) > lease.get(False, 0.0) else "owned",
         "top_game_theowin": str(top_game).lower(),
