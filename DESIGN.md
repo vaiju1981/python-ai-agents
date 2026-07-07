@@ -80,6 +80,5 @@ adding a client dependency.
 
 The opt-in live smoke-test matrix is:
 
-- `gemma4:31b-cloud`
-- `hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0`
-- `ornith:latest`
+- `gemma4:31b-cloud` (cloud tier)
+- `ornith:latest` (local tier)

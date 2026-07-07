@@ -74,7 +74,6 @@ local/offline candidate.
 
 ## Recommendation
 
-Use `gemma4:31b-cloud` as the default production-demo model when cloud access is
-acceptable. Use `ornith:latest` as the local/offline candidate. Run
-`hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0` only as an optional regression
-target for tool-call handling, not as the primary production-demo comparison.
+Use `gemma4:31b-cloud` as the cloud-tier default and `ornith:latest` as the
+local/offline default. Compare within the tier you can actually deploy; only look
+across tiers for reference.

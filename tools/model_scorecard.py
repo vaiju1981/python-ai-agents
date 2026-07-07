@@ -5,9 +5,20 @@ Run from the repository root:
     PYTHONPATH=src:. python tools/model_scorecard.py
 
 The harness compares candidate Ollama models by running the actual analytics
-demo path: CSV import, deterministic profiling, semantic model construction,
-the demo agent prompt, AnalyticsToolset, and ModelsToolset. It writes both JSON
-and Markdown scorecards.
+demo path: CSV import, deterministic profiling, semantic model construction, the
+demo agent prompt, AnalyticsToolset, and ModelsToolset. It writes both JSON and
+Markdown scorecards.
+
+Design notes (what makes it discriminating rather than "everyone gets 100%"):
+
+* Prompts are **natural business questions** — they never name the tool or its
+  arguments, so the model has to choose the right tool and columns itself.
+* Answer correctness is scored against the **ground truth computed live from the
+  dataset** (partial credit), not substring matches on hand-written terms.
+* Tool selection accepts **any of** a set of defensible tools per case, so using
+  ``run_sql`` where ``run_query`` also works isn't wrongly penalized.
+* Models are grouped into **local** and **cloud** tiers so the ranking is
+  meaningful for a given deployment.
 """
 
 from __future__ import annotations
@@ -16,7 +27,6 @@ import argparse
 import json
 import tempfile
 from collections import Counter
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,12 +48,15 @@ PASS_THRESHOLD = 80.0
 MAX_OLLAMA_CONTEXT = 65_536
 
 RUBRIC_WEIGHTS = {
-    "answer": 35.0,
+    # Correctness is weighted highest: the prompts don't name a tool, and the
+    # expected values are the *true* answers computed from the dataset. Getting the
+    # right number implies the right tool + columns, so a separate argument check
+    # is redundant and was dropped.
+    "answer": 45.0,
+    "tool_selection": 25.0,
     "completion": 10.0,
-    "tool_selection": 20.0,
-    "tool_arguments": 20.0,
     "tool_efficiency": 5.0,
-    "output_hygiene": 10.0,
+    "output_hygiene": 15.0,
 }
 
 
@@ -51,10 +64,9 @@ RUBRIC_WEIGHTS = {
 class ScorecardCase:
     name: str
     category: str
-    prompt: str
-    expected_terms: tuple[str, ...]
-    required_tools: tuple[str, ...]
-    argument_check: Callable[[tuple[dict[str, Any], ...]], tuple[bool, str]] | None = None
+    prompt: str  # a natural business question — it must NOT name the tool or its args
+    expected_terms: tuple[str, ...]  # ground-truth tokens; each entry is a `a|b|c` synonym set
+    tool_groups: tuple[tuple[str, ...], ...]  # each group is satisfied if ANY listed tool is called
     notes: str = ""
 
 
@@ -83,6 +95,10 @@ class ModelResult:
     duration_seconds: float
     cases: tuple[CaseResult, ...] = ()
     error: str = ""
+
+    @property
+    def tier(self) -> str:
+        return _tier(self.model)
 
     @property
     def pass_rate(self) -> float:
@@ -282,153 +298,153 @@ def _scorecard_csv() -> str:
     return "\n".join(rows) + "\n"
 
 
+def _tier(model: str) -> str:
+    return "cloud" if "cloud" in model.lower() else "local"
+
+
+def _ground_truth() -> dict[str, str]:
+    """Compute the true answers from the deterministic scorecard CSV, so correctness
+    is scored against real values that can't drift from the data."""
+    source, _ = build_demo_dataset()
+    try:
+        q = source.native_query
+        region = q(
+            "SELECT region, SUM(revenue) AS r FROM scorecard_sales "
+            "GROUP BY region ORDER BY r DESC LIMIT 1"
+        )[0]
+        product = q(
+            "SELECT product, SUM(profit) AS p FROM scorecard_sales "
+            "GROUP BY product ORDER BY p DESC LIMIT 1"
+        )[0]
+        ppu = q(
+            "SELECT product, SUM(profit) / SUM(units) AS ppu FROM scorecard_sales "
+            "GROUP BY product ORDER BY ppu DESC LIMIT 1"
+        )[0]
+        ab = {
+            row["campaign"]: float(row["m"])
+            for row in q(
+                "SELECT campaign, AVG(revenue) AS m FROM scorecard_sales "
+                "WHERE campaign IN ('test', 'control') GROUP BY campaign"
+            )
+        }
+    finally:
+        source.close()
+    return {
+        "top_region": str(region["region"]),
+        "top_region_revenue": str(int(region["r"])),
+        "top_product": str(product["product"]),
+        "top_product_profit": str(int(product["p"])),
+        "best_ppu_product": str(ppu["product"]),
+        "ab_winner": "test" if ab["test"] > ab["control"] else "control",
+    }
+
+
 def build_cases() -> tuple[ScorecardCase, ...]:
-    table = "scorecard_sales"
-    revenue = f"{table}.revenue"
-    profit = f"{table}.profit"
-    units = f"{table}.units"
-    visits = f"{table}.visits"
-    day = f"{table}.day"
-    region = f"{table}.region"
-    product = f"{table}.product"
-    campaign = f"{table}.campaign"
-    treatment = f"{table}.treatment"
+    gt = _ground_truth()
     return (
         ScorecardCase(
             name="schema_discovery",
             category="analytics-schema",
-            prompt=(
-                "Use describe_dataset once. What table is available and what are two useful "
-                "metrics for analysis?"
-            ),
-            expected_terms=("scorecard_sales", "revenue", "profit"),
-            required_tools=("describe_dataset",),
-            notes="Checks the real demo schema-discovery tool.",
+            prompt="What table is in this dataset, and what are two useful metrics to analyze?",
+            expected_terms=("scorecard_sales", "revenue|profit|cost|units|visits"),
+            tool_groups=(("describe_dataset", "run_sql"),),
+            notes="Natural schema question; the model must reach for a discovery tool.",
         ),
         ScorecardCase(
             name="revenue_by_region",
             category="analytics-query",
-            prompt=(
-                f"Use run_query with metric {revenue} grouped by dimension {region}. "
-                "Which region has the highest total revenue?"
-            ),
-            expected_terms=("east", "1218"),
-            required_tools=("run_query",),
-            argument_check=_requires_refs(
-                ("run_query", "metrics", revenue),
-                ("run_query", "dimensions", region),
-            ),
-            notes="Metric/dimension planning through AnalyticsToolset.run_query.",
+            prompt="Which region has the highest total revenue, and what is that total?",
+            expected_terms=(gt["top_region"], gt["top_region_revenue"]),
+            tool_groups=(("run_query", "run_sql"),),
+            notes="Ground truth: the top region and its summed revenue.",
         ),
         ScorecardCase(
-            name="profit_by_product_sql",
+            name="profit_by_product",
             category="analytics-sql",
-            prompt=(
-                "Use run_sql to compute total profit by product from scorecard_sales. "
-                "Which product has the higher total profit and what is the total?"
-            ),
-            expected_terms=("gadget", "1047"),
-            required_tools=("run_sql",),
-            argument_check=lambda calls: _has_sql_terms(calls, ("scorecard_sales", "product", "profit")),
-            notes="Read-only SQL fallback through the real analytics SQL guard.",
+            prompt="Which product has the higher total profit, and what is the total?",
+            expected_terms=(gt["top_product"], gt["top_product_profit"]),
+            tool_groups=(("run_sql", "run_query"),),
+            notes="Ground truth: the top product and its summed profit.",
+        ),
+        ScorecardCase(
+            name="profit_per_unit",
+            category="analytics-derived",
+            prompt="Which product has the highest profit per unit sold?",
+            expected_terms=(gt["best_ppu_product"],),
+            tool_groups=(("run_sql",),),
+            notes="Harder: a derived metric (profit/units) needs SQL, not a plain group-by.",
         ),
         ScorecardCase(
             name="revenue_trend",
             category="analytics-time",
-            prompt=(
-                f"Use trend for metric {revenue} with timeColumn {day}, grain month, "
-                "and lastDays 220. Summarize whether revenue is rising."
-            ),
-            expected_terms=("rising", "revenue"),
-            required_tools=("trend",),
-            argument_check=_requires_refs(
-                ("trend", "metrics", revenue),
-                ("trend", "timeColumn", day),
-            ),
-            notes="Time-series tool selection and date-column argument handling.",
+            prompt="Is total revenue rising or falling across the months?",
+            expected_terms=("rising|increasing|upward|grew|growth|higher|up",),
+            tool_groups=(("trend", "run_sql", "run_query"),),
+            notes="Trend direction (the data rises by construction).",
         ),
         ScorecardCase(
             name="summarize_profit",
             category="analytics-stats",
-            prompt=f"Use summarize for metric {profit}. Report the mean and range.",
-            expected_terms=("mean", "profit"),
-            required_tools=("summarize",),
-            argument_check=_requires_refs(("summarize", "metric", profit)),
-            notes="Descriptive statistics via the real summarize tool.",
+            prompt="Give me the average profit and its range (min and max).",
+            expected_terms=("mean|average|avg", "range|min|max|lowest|highest"),
+            tool_groups=(("summarize", "run_sql"),),
+            notes="Descriptive statistics under a natural prompt.",
+        ),
+        ScorecardCase(
+            name="drivers_of_profit",
+            category="analytics-drivers",
+            prompt="Which numeric factors most strongly relate to profit?",
+            expected_terms=("revenue|cost",),
+            tool_groups=(("correlate", "regression", "build_model"),),
+            notes="Harder: ambiguous — several tools are defensible; revenue/cost drive profit most.",
         ),
         ScorecardCase(
             name="build_predictive_model",
             category="analytics-modeling",
-            prompt=(
-                f"Use build_model to predict {profit} from predictors {revenue}, {cost_ref()}, "
-                f"{units}, and {visits}. Which feature is most important?"
-            ),
-            expected_terms=("feature", "importance"),
-            required_tools=("build_model",),
-            argument_check=_requires_refs(("build_model", "target", profit)),
-            notes="Predictive ModelsToolset path with train-once-ready API.",
+            prompt="Build a model that predicts profit and tell me which feature matters most.",
+            expected_terms=("importance|important|feature",),
+            tool_groups=(("build_model",),),
+            notes="Feature importance is data-dependent, so the answer token is scored lightly.",
         ),
         ScorecardCase(
             name="forecast_revenue",
             category="analytics-forecast",
-            prompt=(
-                f"Use forecast for metric {revenue}, timeColumn {day}, horizon 2. "
-                "Report the forecast method and first forecast value."
-            ),
-            expected_terms=("forecast", "method"),
-            required_tools=("forecast",),
-            argument_check=_requires_refs(
-                ("forecast", "metric", revenue),
-                ("forecast", "timeColumn", day),
-            ),
-            notes="Forecasting through the demo predictive toolset.",
+            prompt="Project revenue for the next two months, and tell me what method you used.",
+            expected_terms=("forecast|projection|method|holt|trend",),
+            tool_groups=(("forecast",),),
+            notes="Forecasting tool selection under a natural prompt.",
         ),
         ScorecardCase(
             name="campaign_ab_test",
             category="analytics-experiment",
             prompt=(
-                f"Use ab_test for metric {revenue}, groupColumn {campaign}, groupA test, "
-                "and groupB control. Report the difference and p-value."
+                "Did the 'test' campaign beat 'control' on revenue, and is the difference "
+                "statistically significant?"
             ),
-            expected_terms=("difference", "p"),
-            required_tools=("ab_test",),
-            argument_check=_requires_refs(
-                ("ab_test", "metric", revenue),
-                ("ab_test", "groupColumn", campaign),
-                ("ab_test", "groupA", "test"),
-                ("ab_test", "groupB", "control"),
-            ),
-            notes="Experiment-style analytics via ModelsToolset.ab_test.",
+            expected_terms=(gt["ab_winner"], "significant|p-value|p value|significance"),
+            tool_groups=(("ab_test",),),
+            notes="Ground truth: which campaign wins on average revenue, plus a significance claim.",
         ),
         ScorecardCase(
             name="causal_effect",
             category="analytics-causal",
             prompt=(
-                f"Use causal_effect with target {profit}, treatment {treatment}, "
-                f"and controls {units}, {visits}. Report the caveat."
+                "Does the treatment cause higher profit, after adjusting for units and visits? "
+                "Be explicit about how much we can actually conclude."
             ),
-            expected_terms=("causation", "confound"),
-            required_tools=("causal_effect",),
-            argument_check=_requires_refs(
-                ("causal_effect", "target", profit),
-                ("causal_effect", "treatment", treatment),
-            ),
-            notes="Causal caveat and treatment-effect tool behavior.",
+            expected_terms=("causation|causal|confound|cannot|not proof|not prove",),
+            tool_groups=(("causal_effect", "regression"),),
+            notes="Must surface the not-proof-of-causation caveat.",
         ),
         ScorecardCase(
             name="cluster_segments",
             category="analytics-segmentation",
-            prompt=f"Use cluster with columns {revenue}, {profit}, and {visits}, k 3.",
-            expected_terms=("cluster", "silhouette"),
-            required_tools=("cluster",),
-            argument_check=_requires_refs(("cluster", "columns", revenue), ("cluster", "columns", profit)),
-            notes="Segmentation tool routing and argument construction.",
+            prompt="Group the rows into three segments based on their numeric behavior.",
+            expected_terms=("cluster|segment|group",),
+            tool_groups=(("cluster",),),
+            notes="Segmentation tool selection under a natural prompt.",
         ),
     )
-
-
-def cost_ref() -> str:
-    return "scorecard_sales.cost"
 
 
 def score_case(
@@ -442,13 +458,24 @@ def score_case(
     warnings: list[str] = []
     rubric = {name: 0.0 for name in RUBRIC_WEIGHTS}
 
-    normalized_output = _normalize_answer_text(output)
-    missing_terms = [term for term in case.expected_terms if term.lower() not in normalized_output]
-    if not missing_terms:
-        rubric["answer"] = RUBRIC_WEIGHTS["answer"]
-        details.append("answer terms ok")
+    normalized = _normalize_answer_text(output)
+
+    # Answer correctness: fraction of ground-truth tokens present (partial credit).
+    if case.expected_terms:
+        found = [term for term in case.expected_terms if _term_present(term, normalized)]
+        rubric["answer"] = RUBRIC_WEIGHTS["answer"] * len(found) / len(case.expected_terms)
+        missing = [term for term in case.expected_terms if term not in found]
+        details.append("answer ok" if not missing else f"answer missing: {', '.join(missing)}")
     else:
-        details.append(f"missing answer terms: {', '.join(missing_terms)}")
+        rubric["answer"] = RUBRIC_WEIGHTS["answer"]
+
+    # Tool selection: each group is satisfied if ANY of its tools was called.
+    missing_groups = _missing_tool_groups(case.tool_groups, tool_calls)
+    if not missing_groups:
+        rubric["tool_selection"] = RUBRIC_WEIGHTS["tool_selection"]
+        details.append("tool ok")
+    else:
+        details.append("missing tool (any of): " + "; ".join("/".join(g) for g in missing_groups))
 
     if stop_reason == "completed":
         rubric["completion"] = RUBRIC_WEIGHTS["completion"]
@@ -456,22 +483,7 @@ def score_case(
     else:
         details.append(f"stop_reason={stop_reason}")
 
-    missing_tools = _missing_required_tools(case.required_tools, tool_calls)
-    if not missing_tools:
-        rubric["tool_selection"] = RUBRIC_WEIGHTS["tool_selection"]
-        details.append("required tools ok")
-    else:
-        details.append(f"missing tools: {', '.join(missing_tools)}")
-
-    if case.argument_check is None:
-        rubric["tool_arguments"] = RUBRIC_WEIGHTS["tool_arguments"]
-    else:
-        ok, message = case.argument_check(tool_calls)
-        if ok:
-            rubric["tool_arguments"] = RUBRIC_WEIGHTS["tool_arguments"]
-        details.append(f"arguments: {message}")
-
-    efficient, efficiency_detail = _tool_efficiency(case.required_tools, tool_calls)
+    efficient, efficiency_detail = _tool_efficiency(case.tool_groups, tool_calls)
     if efficient:
         rubric["tool_efficiency"] = RUBRIC_WEIGHTS["tool_efficiency"]
     details.append(f"efficiency: {efficiency_detail}")
@@ -492,33 +504,29 @@ def case_max_score(case: ScorecardCase) -> float:
     return sum(RUBRIC_WEIGHTS.values())
 
 
-def _missing_required_tools(
-    required_tools: tuple[str, ...],
+def _term_present(term: str, normalized_output: str) -> bool:
+    """A term is present if ANY of its `a|b|c` synonyms appears in the output."""
+    return any(syn.strip() in normalized_output for syn in term.lower().split("|") if syn.strip())
+
+
+def _missing_tool_groups(
+    tool_groups: tuple[tuple[str, ...], ...],
     tool_calls: tuple[dict[str, Any], ...],
-) -> list[str]:
-    actual = Counter(call["name"] for call in tool_calls)
-    required = Counter(required_tools)
-    missing: list[str] = []
-    for name, count in required.items():
-        if actual[name] < count:
-            missing.extend([name] * (count - actual[name]))
-    return missing
+) -> list[tuple[str, ...]]:
+    called = {call["name"] for call in tool_calls}
+    return [group for group in tool_groups if not any(name in called for name in group)]
 
 
 def _tool_efficiency(
-    required_tools: tuple[str, ...],
+    tool_groups: tuple[tuple[str, ...], ...],
     tool_calls: tuple[dict[str, Any], ...],
 ) -> tuple[bool, str]:
-    required_count = len(required_tools)
     actual_count = len(tool_calls)
     if actual_count == 0:
         return False, "no tool calls"
-    allowed_count = required_count + 1
-    repeated = [
-        name
-        for name, count in Counter(call["name"] for call in tool_calls).items()
-        if count > Counter(required_tools)[name] + 1
-    ]
+    allowed_count = len(tool_groups) + 1
+    counts = Counter(call["name"] for call in tool_calls)
+    repeated = [name for name, count in counts.items() if count > 2]
     if actual_count > allowed_count:
         return False, f"too many calls ({actual_count} > {allowed_count})"
     if repeated:
@@ -552,65 +560,10 @@ def _normalize_answer_text(text: str) -> str:
     return text.lower().replace(",", "")
 
 
-def _requires_refs(
-    *checks: tuple[str, str, str],
-) -> Callable[[tuple[dict[str, Any], ...]], tuple[bool, str]]:
-    def check(calls: tuple[dict[str, Any], ...]) -> tuple[bool, str]:
-        missing = [
-            f"{tool_name}.{key} contains {value}"
-            for tool_name, key, value in checks
-            if not _argument_contains(calls, tool_name, key, value)
-        ]
-        if missing:
-            return False, f"missing refs: {', '.join(missing)}"
-        return True, "argument refs ok"
-
-    return check
-
-
-def _argument_contains(
-    calls: tuple[dict[str, Any], ...],
-    tool_name: str,
-    key: str,
-    value: str,
-) -> bool:
-    expected = value.lower()
-    for call in calls:
-        if call["name"] != tool_name:
-            continue
-        actual = call["arguments"].get(key)
-        if _value_contains(actual, expected):
-            return True
-    return False
-
-
-def _value_contains(actual: Any, expected: str) -> bool:
-    if isinstance(actual, str):
-        return actual.lower() == expected or expected in actual.lower()
-    if isinstance(actual, (list, tuple)):
-        return any(_value_contains(item, expected) for item in actual)
-    return str(actual).lower() == expected
-
-
-def _has_sql_terms(
-    calls: tuple[dict[str, Any], ...],
-    terms: tuple[str, ...],
-) -> tuple[bool, str]:
-    sql_values = [
-        str(call["arguments"].get("sql", "")).lower()
-        for call in calls
-        if call["name"] == "run_sql"
-    ]
-    if not sql_values:
-        return False, "no SQL argument"
-    sql = sql_values[-1]
-    missing = [term for term in terms if term not in sql]
-    return not missing, "sql terms ok" if not missing else f"missing SQL terms: {missing}"
-
-
 def model_result_to_dict(result: ModelResult) -> dict[str, Any]:
     return {
         "model": result.model,
+        "tier": result.tier,
         "available": result.available,
         "score": result.score,
         "max_score": result.max_score,
@@ -644,20 +597,22 @@ def render_markdown(results: tuple[ModelResult, ...]) -> str:
         "# Ollama Analytics Demo Model Scorecard",
         "",
         "Harness: `demos.analytics` CSV source, profiler, semantic model, demo agent, "
-        "`AnalyticsToolset`, and `ModelsToolset`.",
+        "`AnalyticsToolset`, and `ModelsToolset`. Prompts are natural questions (the tool is "
+        "not named); correctness is scored against ground truth computed from the data.",
         "",
-        "| Model | Score | Pass Rate | Duration | Status |",
-        "| --- | ---: | ---: | ---: | --- |",
+        "| Model | Tier | Score | Pass Rate | Duration | Status |",
+        "| --- | --- | ---: | ---: | ---: | --- |",
     ]
     for result in results:
         if not result.available:
             lines.append(
-                f"| `{result.model}` | n/a | n/a | {result.duration_seconds:.1f}s | unavailable |"
+                f"| `{result.model}` | {result.tier} | n/a | n/a | "
+                f"{result.duration_seconds:.1f}s | unavailable |"
             )
             continue
         status = result.error or "ok"
         lines.append(
-            f"| `{result.model}` | {result.score:.1f}/{result.max_score:.1f} "
+            f"| `{result.model}` | {result.tier} | {result.score:.1f}/{result.max_score:.1f} "
             f"({result.percent * 100:.1f}%) | {result.pass_rate * 100:.1f}% | "
             f"{result.duration_seconds:.1f}s | {status} |"
         )
@@ -672,18 +627,22 @@ def render_markdown(results: tuple[ModelResult, ...]) -> str:
 
     lines.extend(["", "## Rubric", ""])
     lines.extend(["| Component | Points | Meaning |", "| --- | ---: | --- |"])
-    lines.append("| Answer correctness | 35 | Expected facts/terms appear in the final answer. |")
-    lines.append("| Completion | 10 | Agent turn completed without hitting an error/step limit. |")
-    lines.append("| Tool selection | 20 | Required analytics demo tools were called. |")
-    lines.append("| Tool arguments | 20 | Tool arguments used discovered table/column refs. |")
-    lines.append("| Tool efficiency | 5 | No excessive repeated tool calls. |")
     lines.append(
-        "| Output hygiene | 10 | Final answer is clean: no visible `<think>` trace and not empty. |"
+        "| Answer correctness | 45 | The dataset's *true* answer (computed from the CSV) appears "
+        "in the reply; partial credit per fact. |"
+    )
+    lines.append(
+        "| Tool selection | 25 | A relevant analytics tool was chosen — the prompt does not name it. |"
+    )
+    lines.append("| Completion | 10 | Agent turn completed without an error/step limit. |")
+    lines.append("| Tool efficiency | 5 | No excessive or repeated tool calls. |")
+    lines.append(
+        "| Output hygiene | 15 | Final answer is clean: no visible `<think>` trace and not empty. |"
     )
 
     lines.extend(["", "## Case Details", ""])
     for result in results:
-        lines.append(f"### {result.model}")
+        lines.append(f"### {result.model} ({result.tier})")
         if result.error:
             lines.extend(["", f"- Error: {result.error}", ""])
             continue
@@ -703,17 +662,22 @@ def render_markdown(results: tuple[ModelResult, ...]) -> str:
                 f"{mark} | {tools} | {warnings} | {case.detail} |"
             )
         lines.append("")
+
     lines.extend(["## Selection Heuristic", ""])
-    lines.append(
-        "- Prefer the highest score for the production analytics demo, but inspect "
-        "modeling, forecast, SQL, and causal rows first."
-    )
-    lines.append("- Use the fastest passing model when analytics-tool accuracy is tied.")
-    lines.append(
-        "- Treat failures to call required demo tools as blockers, even if the final "
-        "answer sounds plausible."
-    )
+    best_local = _best_in_tier(results, "local")
+    best_cloud = _best_in_tier(results, "cloud")
+    if best_local:
+        lines.append(f"- Best **local** model: `{best_local.model}` ({best_local.percent * 100:.1f}%).")
+    if best_cloud:
+        lines.append(f"- Best **cloud** model: `{best_cloud.model}` ({best_cloud.percent * 100:.1f}%).")
+    lines.append("- Pick within the tier you can actually deploy; only compare across tiers for reference.")
+    lines.append("- Prefer higher correctness; break ties on the modeling/forecast/causal rows, then speed.")
     return "\n".join(lines)
+
+
+def _best_in_tier(results: tuple[ModelResult, ...], tier: str) -> ModelResult | None:
+    candidates = [r for r in results if r.available and not r.error and r.tier == tier]
+    return max(candidates, key=lambda r: r.percent) if candidates else None
 
 
 def _fastest_available_duration(results: tuple[ModelResult, ...]) -> float | None:

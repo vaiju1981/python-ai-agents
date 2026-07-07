@@ -116,9 +116,8 @@ PAA_RUN_OLLAMA_TESTS=1 python -m pytest tests/test_ollama_adapter.py
 
 The default live test matrix is:
 
-- `gemma4:31b-cloud`
-- `hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0`
-- `ornith:latest`
+- `gemma4:31b-cloud` (cloud)
+- `ornith:latest` (local)
 
 Normal test runs use a fake Ollama transport and do not require Ollama to be running.
 

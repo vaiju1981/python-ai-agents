@@ -25,7 +25,7 @@ class FakeOllamaTransport:
         return {
             "models": [
                 {"name": "ornith:latest"},
-                {"name": "hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0"},
+                {"name": "gemma4:31b-cloud"},
             ]
         }
 
@@ -73,8 +73,8 @@ def test_ollama_agent_lists_models() -> None:
         agent = OllamaAgent("ornith:latest", transport=FakeOllamaTransport())
 
         assert await agent.has_model()
-        assert await agent.has_model("hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0")
-        assert not await agent.has_model("gemma4:31b-cloud")
+        assert await agent.has_model("gemma4:31b-cloud")
+        assert not await agent.has_model("absent:model")
 
     anyio.run(run)
 
