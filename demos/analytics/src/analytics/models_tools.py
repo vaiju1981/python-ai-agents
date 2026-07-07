@@ -561,12 +561,29 @@ def _forecast_values(series: Any, horizon: int) -> tuple[list[float], str]:
     import numpy as np
 
     n = len(series)
-    if n >= 12:
+    # Season-aware: additive trend + seasonality when at least two full cycles are
+    # present (period 12 = yearly on monthly buckets, 4 = quarterly). Falls back to
+    # trend-only Holt-Winters, then a linear trend, if a fit fails or data is short.
+    for period in (12, 4):
+        if n >= 2 * period:
+            try:
+                from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
+                fit = ExponentialSmoothing(
+                    series, trend="add", seasonal="add", seasonal_periods=period
+                ).fit()
+                return (
+                    list(fit.forecast(horizon)),
+                    f"Holt-Winters (additive trend + seasonality, period={period})",
+                )
+            except Exception:
+                pass
+    if n >= 4:
         try:
             from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
             fit = ExponentialSmoothing(series, trend="add", seasonal=None).fit()
-            return list(fit.forecast(horizon)), "Holt-Winters exponential smoothing"
+            return list(fit.forecast(horizon)), "Holt-Winters (additive trend, no seasonality)"
         except Exception:
             pass
     # Fallback: linear trend
