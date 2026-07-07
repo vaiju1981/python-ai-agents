@@ -1,18 +1,20 @@
-"""Live Ollama model scorecard for production-demo model selection.
+"""Live Ollama scorecard using the production analytics demo stack.
 
 Run from the repository root:
 
-    PYTHONPATH=src python tools/model_scorecard.py
+    PYTHONPATH=src:. python tools/model_scorecard.py
 
-The harness compares candidate Ollama models on simple prompting, complex
-reasoning, multi-turn memory, single-tool use, multi-tool use, and
-analytics-style tool calls. It writes both JSON and Markdown scorecards.
+The harness compares candidate Ollama models by running the actual analytics
+demo path: CSV import, deterministic profiling, semantic model construction,
+the demo agent prompt, AnalyticsToolset, and ModelsToolset. It writes both JSON
+and Markdown scorecards.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import tempfile
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -23,22 +25,17 @@ from typing import Any
 
 import anyio
 
-from python_ai_agents import (
-    AgentRequest,
-    DefaultAgent,
-    InMemoryConversationStore,
-    RecordingObserver,
-    RequestContext,
-    ToolEffect,
-    ToolResult,
-    ToolSpec,
-)
+from demos.analytics.src.analytics.agent import create_agent
+from demos.analytics.src.analytics.csv_source import CsvSource
+from demos.analytics.src.analytics.profiler import profile_dataset
+from demos.analytics.src.analytics.semantic_model import SemanticModel
+from python_ai_agents import AgentRequest, RecordingObserver, RequestContext
 from python_ai_agents.adapters import DEFAULT_OLLAMA_TEST_MODELS, OllamaModelPort
-from python_ai_agents.core.tool import Tool
 
 DEFAULT_MODELS = DEFAULT_OLLAMA_TEST_MODELS
 DEFAULT_OUTPUT_DIR = Path("model_scorecards")
 PASS_THRESHOLD = 80.0
+MAX_OLLAMA_CONTEXT = 65_536
 
 RUBRIC_WEIGHTS = {
     "answer": 35.0,
@@ -56,9 +53,7 @@ class ScorecardCase:
     category: str
     prompt: str
     expected_terms: tuple[str, ...]
-    tools: tuple[Tool, ...] = ()
-    turns: tuple[str, ...] = ()
-    required_tools: tuple[str, ...] = ()
+    required_tools: tuple[str, ...]
     argument_check: Callable[[tuple[dict[str, Any], ...]], tuple[bool, str]] | None = None
     notes: str = ""
 
@@ -100,38 +95,18 @@ class ModelResult:
         return self.score / self.max_score if self.max_score else 0.0
 
 
-@dataclass(slots=True)
-class FunctionTool:
-    _spec: ToolSpec
-    _fn: Callable[[dict[str, Any]], str]
-
-    @property
-    def spec(self) -> ToolSpec:
-        return self._spec
-
-    async def invoke(self, arguments: dict[str, Any], context: RequestContext) -> ToolResult:
-        try:
-            return ToolResult.ok(self._fn(arguments))
-        except Exception as exc:
-            return ToolResult.failed(f"{self.spec.name} failed: {exc}")
-
-
-SALES_ROWS = (
-    {"region": "North", "product": "Widget", "revenue": 120, "cost": 80, "units": 6},
-    {"region": "South", "product": "Widget", "revenue": 90, "cost": 60, "units": 5},
-    {"region": "East", "product": "Gadget", "revenue": 150, "cost": 90, "units": 10},
-    {"region": "West", "product": "Gadget", "revenue": 130, "cost": 95, "units": 8},
-)
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Score Ollama models for the production demo.")
+    parser = argparse.ArgumentParser(
+        description="Score Ollama models through the analytics demo stack."
+    )
     parser.add_argument("--models", nargs="*", default=list(DEFAULT_MODELS))
     parser.add_argument("--base-url", default="http://127.0.0.1:11434")
-    parser.add_argument("--timeout", type=float, default=240.0)
+    parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--num-ctx", type=int, default=MAX_OLLAMA_CONTEXT)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--max-steps", type=int, default=8)
     args = parser.parse_args()
+    num_ctx = min(args.num_ctx, MAX_OLLAMA_CONTEXT)
 
     results = anyio.run(
         run_scorecard,
@@ -139,6 +114,7 @@ def main() -> None:
         args.base_url,
         args.timeout,
         args.max_steps,
+        num_ctx,
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -147,6 +123,8 @@ def main() -> None:
 
     payload = {
         "generated_at": timestamp,
+        "harness": "demos.analytics",
+        "ollama_options": {"temperature": 0, "top_p": 0.1, "num_ctx": num_ctx},
         "models": [model_result_to_dict(result) for result in results],
     }
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -162,19 +140,22 @@ async def run_scorecard(
     base_url: str,
     timeout: float,
     max_steps: int,
+    num_ctx: int,
 ) -> tuple[ModelResult, ...]:
     cases = build_cases()
     results: list[ModelResult] = []
     for model_name in models:
+        print(f"[scorecard] model={model_name} starting", flush=True)
         model_start = perf_counter()
         model = OllamaModelPort(
             model_name,
             base_url=base_url,
-            options={"temperature": 0, "top_p": 0.1},
+            options={"temperature": 0, "top_p": 0.1, "num_ctx": num_ctx},
             timeout=timeout,
         )
         try:
             if not await model.has_model():
+                print(f"[scorecard] model={model_name} unavailable", flush=True)
                 results.append(
                     ModelResult(
                         model=model_name,
@@ -186,7 +167,18 @@ async def run_scorecard(
                     )
                 )
                 continue
-            case_results = [await run_case(model_name, model, case, max_steps) for case in cases]
+            case_results = []
+            for case in cases:
+                print(f"[scorecard] model={model_name} case={case.name} starting", flush=True)
+                case_result = await run_case(model_name, model, case, max_steps)
+                case_results.append(case_result)
+                mark = "PASS" if case_result.passed else "FAIL"
+                print(
+                    f"[scorecard] model={model_name} case={case.name} "
+                    f"{mark} score={case_result.score:.1f}/{case_result.max_score:.1f} "
+                    f"duration={case_result.duration_seconds:.1f}s",
+                    flush=True,
+                )
             results.append(
                 ModelResult(
                     model=model_name,
@@ -197,7 +189,9 @@ async def run_scorecard(
                     cases=tuple(case_results),
                 )
             )
+            print(f"[scorecard] model={model_name} finished", flush=True)
         except Exception as exc:
+            print(f"[scorecard] model={model_name} error={exc.__class__.__name__}: {exc}", flush=True)
             results.append(
                 ModelResult(
                     model=model_name,
@@ -218,32 +212,24 @@ async def run_case(
     max_steps: int,
 ) -> CaseResult:
     observer = RecordingObserver()
-    agent = DefaultAgent(
-        model=model,
-        tools=list(case.tools),
-        system_prompt=system_prompt_for(case),
-        max_steps=max_steps,
-        observers=[observer],
-        conversation_store=InMemoryConversationStore(),
-        tool_timeout_seconds=30.0,
-    )
-    context = RequestContext(session_id=f"scorecard-{model_name}-{case.name}", tenant="scorecard")
+    source: CsvSource | None = None
     started = perf_counter()
     output = ""
     stop_reason = ""
     try:
-        if case.turns:
-            for turn in case.turns:
-                response = await agent.run(AgentRequest(turn, context))
-                output = response.output
-                stop_reason = response.stop_reason
-        else:
-            response = await agent.run(AgentRequest(case.prompt, context))
-            output = response.output
-            stop_reason = response.stop_reason
+        source, semantic = build_demo_dataset()
+        agent = create_agent(source, model, semantic, observers=[observer])
+        agent.max_steps = max_steps
+        context = RequestContext(session_id=f"analytics-scorecard-{model_name}-{case.name}")
+        response = await agent.run(AgentRequest(case.prompt, context))
+        output = response.output
+        stop_reason = response.stop_reason
     except Exception as exc:
         output = f"{exc.__class__.__name__}: {exc}"
         stop_reason = "error"
+    finally:
+        if source is not None:
+            source.close()
 
     tool_calls = tuple(
         {"name": call.name, "arguments": call.arguments} for call in observer.tool_calls
@@ -270,275 +256,179 @@ async def run_case(
     )
 
 
-def build_cases() -> tuple[ScorecardCase, ...]:
-    return (
-        ScorecardCase(
-            name="simple_exact",
-            category="simple",
-            prompt="Reply with exactly: PASS",
-            expected_terms=("pass",),
-            notes="Basic instruction following.",
-        ),
-        ScorecardCase(
-            name="complex_reasoning",
-            category="complex",
-            prompt=(
-                "Facts: East revenue is 150 and South revenue is 90. "
-                "Which region leads and by how much? Answer as 'East leads by 60'."
-            ),
-            expected_terms=("east", "60"),
-            notes="Small arithmetic with constrained wording.",
-        ),
-        ScorecardCase(
-            name="multi_turn_memory",
-            category="multi-turn",
-            prompt="",
-            turns=(
-                "Remember for this session: North revenue is 120 and South revenue is 90. Reply OK.",
-                "Using only what I told you earlier, which region has higher revenue and by how much?",
-            ),
-            expected_terms=("north", "30"),
-            notes="Checks conversation store plus model recall.",
-        ),
-        ScorecardCase(
-            name="single_tool_addition",
-            category="single-tool",
-            prompt="Use the add_numbers tool to add 17 and 25. Then answer with the sum.",
-            expected_terms=("42",),
-            tools=(add_numbers_tool(),),
-            required_tools=("add_numbers",),
-            argument_check=lambda calls: _has_numbers(calls, "add_numbers", (17, 25)),
-            notes="Canonical function-call reliability.",
-        ),
-        ScorecardCase(
-            name="multi_tool_metric_delta",
-            category="multi-tool",
-            prompt=(
-                "Use lookup_metric for North revenue and South revenue, then use subtract_numbers "
-                "to compute North minus South. Final answer should say North leads by the difference."
-            ),
-            expected_terms=("north", "30"),
-            tools=(lookup_metric_tool(), subtract_numbers_tool()),
-            required_tools=("lookup_metric", "lookup_metric", "subtract_numbers"),
-            argument_check=_checks_metric_delta,
-            notes="Requires sequencing two lookup calls plus math.",
-        ),
-        ScorecardCase(
-            name="analytics_groupby",
-            category="analytics",
-            prompt=(
-                "Use run_metric_query to calculate total revenue by region. "
-                "Which region has the highest total revenue and what is the amount?"
-            ),
-            expected_terms=("east", "150"),
-            tools=(run_metric_query_tool(),),
-            required_tools=("run_metric_query",),
-            argument_check=_requires_argument_pairs(
-                ("run_metric_query", "metric", "revenue"),
-                ("run_metric_query", "dimension", "region"),
-            ),
-            notes="Analytics agent: choose metric + dimension.",
-        ),
-        ScorecardCase(
-            name="analytics_margin_rank",
-            category="analytics-complex",
-            prompt=(
-                "Use rank_metric with metric margin_rate grouped by product. "
-                "Which product has the higher margin rate?"
-            ),
-            expected_terms=("gadget",),
-            tools=(rank_metric_tool(),),
-            required_tools=("rank_metric",),
-            argument_check=_requires_argument_pairs(
-                ("rank_metric", "metric", "margin_rate"),
-                ("rank_metric", "dimension", "product"),
-            ),
-            notes="Derived metric over grouped records.",
-        ),
-        ScorecardCase(
-            name="complex_sql_tool",
-            category="complex-tool",
-            prompt=(
-                "Use read_only_sql to calculate gross margin by product from sales. "
-                "Then tell me which product has the highest gross margin."
-            ),
-            expected_terms=("gadget", "95"),
-            tools=(read_only_sql_tool(),),
-            required_tools=("read_only_sql",),
-            argument_check=lambda calls: _has_sql_terms(calls, ("product", "revenue", "cost")),
-            notes="SQL-shaped complex tool use for analytics fallback.",
-        ),
-    )
+def build_demo_dataset() -> tuple[CsvSource, SemanticModel]:
+    tmp_dir = tempfile.TemporaryDirectory()
+    csv_path = Path(tmp_dir.name) / "scorecard_sales.csv"
+    csv_path.write_text(_scorecard_csv(), encoding="utf-8")
+    source = CsvSource(named_csvs={"scorecard_sales": csv_path})
+    source._scorecard_tmp_dir = tmp_dir  # type: ignore[attr-defined]
+    profile = profile_dataset(source)
+    semantic = SemanticModel.from_profile(profile)
+    return source, semantic
 
 
-def system_prompt_for(case: ScorecardCase) -> str:
-    if not case.tools:
-        return (
-            "You are being evaluated. Follow the user instructions exactly. "
-            "Be terse and do not add caveats."
+def _scorecard_csv() -> str:
+    rows = ["day,region,product,campaign,treatment,revenue,cost,profit,units,visits"]
+    months = ("2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06")
+    for idx, month in enumerate(months, start=1):
+        rows.extend(
+            [
+                f"{month}-05,North,Widget,control,0,{100 + idx * 10},{60 + idx * 4},{40 + idx * 6},{20 + idx},{80 + idx * 3}",
+                f"{month}-10,South,Widget,test,1,{110 + idx * 12},{65 + idx * 4},{45 + idx * 8},{22 + idx},{88 + idx * 4}",
+                f"{month}-15,East,Gadget,test,1,{140 + idx * 18},{70 + idx * 5},{70 + idx * 13},{26 + idx},{95 + idx * 5}",
+                f"{month}-20,West,Gadget,control,0,{120 + idx * 8},{75 + idx * 4},{45 + idx * 4},{18 + idx},{82 + idx * 3}",
+            ]
         )
+    return "\n".join(rows) + "\n"
+
+
+def build_cases() -> tuple[ScorecardCase, ...]:
+    table = "scorecard_sales"
+    revenue = f"{table}.revenue"
+    profit = f"{table}.profit"
+    units = f"{table}.units"
+    visits = f"{table}.visits"
+    day = f"{table}.day"
+    region = f"{table}.region"
+    product = f"{table}.product"
+    campaign = f"{table}.campaign"
+    treatment = f"{table}.treatment"
     return (
-        "You are being evaluated for production agent tool use. "
-        "When the user asks you to use a tool, call the appropriate tool with valid arguments. "
-        "After tool results are available, stop calling tools and answer tersely with the requested value."
-    )
-
-
-def add_numbers_tool() -> Tool:
-    return FunctionTool(
-        ToolSpec(
-            name="add_numbers",
-            description="Add two numbers.",
-            input_schema={
-                "type": "object",
-                "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
-                "required": ["a", "b"],
-            },
-            effect=ToolEffect.READ_ONLY,
-        ),
-        lambda args: str(float(args["a"]) + float(args["b"])).rstrip("0").rstrip("."),
-    )
-
-
-def subtract_numbers_tool() -> Tool:
-    return FunctionTool(
-        ToolSpec(
-            name="subtract_numbers",
-            description="Subtract b from a.",
-            input_schema={
-                "type": "object",
-                "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
-                "required": ["a", "b"],
-            },
-            effect=ToolEffect.READ_ONLY,
-        ),
-        lambda args: str(float(args["a"]) - float(args["b"])).rstrip("0").rstrip("."),
-    )
-
-
-def lookup_metric_tool() -> Tool:
-    return FunctionTool(
-        ToolSpec(
-            name="lookup_metric",
-            description="Look up one metric value for one region.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "region": {"type": "string", "enum": ["North", "South", "East", "West"]},
-                    "metric": {"type": "string", "enum": ["revenue", "cost", "units"]},
-                },
-                "required": ["region", "metric"],
-            },
-            effect=ToolEffect.READ_ONLY,
-        ),
-        lambda args: str(_sum(args["metric"], region=args["region"])),
-    )
-
-
-def run_metric_query_tool() -> Tool:
-    return FunctionTool(
-        ToolSpec(
-            name="run_metric_query",
-            description="Group an analytics metric by one dimension.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "metric": {
-                        "type": "string",
-                        "enum": ["revenue", "cost", "units", "gross_margin", "margin_rate"],
-                    },
-                    "dimension": {"type": "string", "enum": ["region", "product"]},
-                },
-                "required": ["metric", "dimension"],
-            },
-            effect=ToolEffect.READ_ONLY,
-        ),
-        lambda args: json.dumps(_group_metric(args["metric"], args["dimension"]), sort_keys=True),
-    )
-
-
-def rank_metric_tool() -> Tool:
-    return FunctionTool(
-        ToolSpec(
-            name="rank_metric",
-            description="Rank dimension values by metric descending.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "metric": {
-                        "type": "string",
-                        "enum": ["revenue", "cost", "units", "gross_margin", "margin_rate"],
-                    },
-                    "dimension": {"type": "string", "enum": ["region", "product"]},
-                    "top_n": {"type": "integer", "default": 3},
-                },
-                "required": ["metric", "dimension"],
-            },
-            effect=ToolEffect.READ_ONLY,
-        ),
-        lambda args: json.dumps(
-            _group_metric(args["metric"], args["dimension"])[: int(args.get("top_n", 3))],
-            sort_keys=True,
-        ),
-    )
-
-
-def read_only_sql_tool() -> Tool:
-    return FunctionTool(
-        ToolSpec(
-            name="read_only_sql",
-            description=(
-                "Run a read-only SQL query over table sales(region, product, revenue, cost, units)."
+        ScorecardCase(
+            name="schema_discovery",
+            category="analytics-schema",
+            prompt=(
+                "Use describe_dataset once. What table is available and what are two useful "
+                "metrics for analysis?"
             ),
-            input_schema={
-                "type": "object",
-                "properties": {"sql": {"type": "string"}},
-                "required": ["sql"],
-            },
-            effect=ToolEffect.READ_ONLY,
+            expected_terms=("scorecard_sales", "revenue", "profit"),
+            required_tools=("describe_dataset",),
+            notes="Checks the real demo schema-discovery tool.",
         ),
-        _run_synthetic_sql,
+        ScorecardCase(
+            name="revenue_by_region",
+            category="analytics-query",
+            prompt=(
+                f"Use run_query with metric {revenue} grouped by dimension {region}. "
+                "Which region has the highest total revenue?"
+            ),
+            expected_terms=("east", "1218"),
+            required_tools=("run_query",),
+            argument_check=_requires_refs(
+                ("run_query", "metrics", revenue),
+                ("run_query", "dimensions", region),
+            ),
+            notes="Metric/dimension planning through AnalyticsToolset.run_query.",
+        ),
+        ScorecardCase(
+            name="profit_by_product_sql",
+            category="analytics-sql",
+            prompt=(
+                "Use run_sql to compute total profit by product from scorecard_sales. "
+                "Which product has the higher total profit and what is the total?"
+            ),
+            expected_terms=("gadget", "1047"),
+            required_tools=("run_sql",),
+            argument_check=lambda calls: _has_sql_terms(calls, ("scorecard_sales", "product", "profit")),
+            notes="Read-only SQL fallback through the real analytics SQL guard.",
+        ),
+        ScorecardCase(
+            name="revenue_trend",
+            category="analytics-time",
+            prompt=(
+                f"Use trend for metric {revenue} with timeColumn {day}, grain month, "
+                "and lastDays 220. Summarize whether revenue is rising."
+            ),
+            expected_terms=("rising", "revenue"),
+            required_tools=("trend",),
+            argument_check=_requires_refs(
+                ("trend", "metrics", revenue),
+                ("trend", "timeColumn", day),
+            ),
+            notes="Time-series tool selection and date-column argument handling.",
+        ),
+        ScorecardCase(
+            name="summarize_profit",
+            category="analytics-stats",
+            prompt=f"Use summarize for metric {profit}. Report the mean and range.",
+            expected_terms=("mean", "profit"),
+            required_tools=("summarize",),
+            argument_check=_requires_refs(("summarize", "metric", profit)),
+            notes="Descriptive statistics via the real summarize tool.",
+        ),
+        ScorecardCase(
+            name="build_predictive_model",
+            category="analytics-modeling",
+            prompt=(
+                f"Use build_model to predict {profit} from predictors {revenue}, {cost_ref()}, "
+                f"{units}, and {visits}. Which feature is most important?"
+            ),
+            expected_terms=("feature", "importance"),
+            required_tools=("build_model",),
+            argument_check=_requires_refs(("build_model", "target", profit)),
+            notes="Predictive ModelsToolset path with train-once-ready API.",
+        ),
+        ScorecardCase(
+            name="forecast_revenue",
+            category="analytics-forecast",
+            prompt=(
+                f"Use forecast for metric {revenue}, timeColumn {day}, horizon 2. "
+                "Report the forecast method and first forecast value."
+            ),
+            expected_terms=("forecast", "method"),
+            required_tools=("forecast",),
+            argument_check=_requires_refs(
+                ("forecast", "metric", revenue),
+                ("forecast", "timeColumn", day),
+            ),
+            notes="Forecasting through the demo predictive toolset.",
+        ),
+        ScorecardCase(
+            name="campaign_ab_test",
+            category="analytics-experiment",
+            prompt=(
+                f"Use ab_test for metric {revenue}, groupColumn {campaign}, groupA test, "
+                "and groupB control. Report the difference and p-value."
+            ),
+            expected_terms=("difference", "p"),
+            required_tools=("ab_test",),
+            argument_check=_requires_refs(
+                ("ab_test", "metric", revenue),
+                ("ab_test", "groupColumn", campaign),
+                ("ab_test", "groupA", "test"),
+                ("ab_test", "groupB", "control"),
+            ),
+            notes="Experiment-style analytics via ModelsToolset.ab_test.",
+        ),
+        ScorecardCase(
+            name="causal_effect",
+            category="analytics-causal",
+            prompt=(
+                f"Use causal_effect with target {profit}, treatment {treatment}, "
+                f"and controls {units}, {visits}. Report the caveat."
+            ),
+            expected_terms=("caveat", "causation"),
+            required_tools=("causal_effect",),
+            argument_check=_requires_refs(
+                ("causal_effect", "target", profit),
+                ("causal_effect", "treatment", treatment),
+            ),
+            notes="Causal caveat and treatment-effect tool behavior.",
+        ),
+        ScorecardCase(
+            name="cluster_segments",
+            category="analytics-segmentation",
+            prompt=f"Use cluster with columns {revenue}, {profit}, and {visits}, k 3.",
+            expected_terms=("cluster", "silhouette"),
+            required_tools=("cluster",),
+            argument_check=_requires_refs(("cluster", "columns", revenue), ("cluster", "columns", profit)),
+            notes="Segmentation tool routing and argument construction.",
+        ),
     )
 
 
-def _run_synthetic_sql(args: dict[str, Any]) -> str:
-    sql = str(args.get("sql", "")).lower()
-    forbidden = ("insert", "update", "delete", "drop", "alter", "create")
-    if any(word in sql for word in forbidden):
-        raise ValueError("only SELECT queries are allowed")
-    if "product" in sql and "revenue" in sql and "cost" in sql:
-        rows = _group_metric("gross_margin", "product")
-        return json.dumps(rows, sort_keys=True)
-    return json.dumps(SALES_ROWS, sort_keys=True)
-
-
-def _sum(metric: str, *, region: str | None = None, product: str | None = None) -> float:
-    rows = SALES_ROWS
-    if region is not None:
-        rows = tuple(row for row in rows if row["region"].lower() == region.lower())
-    if product is not None:
-        rows = tuple(row for row in rows if row["product"].lower() == product.lower())
-    if metric == "gross_margin":
-        return sum(row["revenue"] - row["cost"] for row in rows)
-    return sum(row[metric] for row in rows)
-
-
-def _group_metric(metric: str, dimension: str) -> list[dict[str, Any]]:
-    groups = sorted({str(row[dimension]) for row in SALES_ROWS})
-    result = []
-    for group in groups:
-        rows = tuple(row for row in SALES_ROWS if row[dimension] == group)
-        revenue = sum(row["revenue"] for row in rows)
-        cost = sum(row["cost"] for row in rows)
-        if metric == "gross_margin":
-            value = revenue - cost
-        elif metric == "margin_rate":
-            value = round((revenue - cost) / revenue, 4)
-        else:
-            value = sum(row[metric] for row in rows)
-        result.append({dimension: group, metric: value})
-    result.sort(key=lambda item: float(item[metric]), reverse=True)
-    return result
+def cost_ref() -> str:
+    return "scorecard_sales.cost"
 
 
 def score_case(
@@ -552,7 +442,7 @@ def score_case(
     warnings: list[str] = []
     rubric = {name: 0.0 for name in RUBRIC_WEIGHTS}
 
-    normalized_output = output.lower()
+    normalized_output = _normalize_answer_text(output)
     missing_terms = [term for term in case.expected_terms if term.lower() not in normalized_output]
     if not missing_terms:
         rubric["answer"] = RUBRIC_WEIGHTS["answer"]
@@ -566,34 +456,25 @@ def score_case(
     else:
         details.append(f"stop_reason={stop_reason}")
 
-    if case.required_tools:
-        missing_tools = _missing_required_tools(case.required_tools, tool_calls)
-        if not missing_tools:
-            rubric["tool_selection"] = RUBRIC_WEIGHTS["tool_selection"]
-            details.append("required tools ok")
-        else:
-            details.append(f"missing tools: {', '.join(missing_tools)}")
-
-        if case.argument_check is None:
-            rubric["tool_arguments"] = RUBRIC_WEIGHTS["tool_arguments"]
-        else:
-            ok, message = case.argument_check(tool_calls)
-            if ok:
-                rubric["tool_arguments"] = RUBRIC_WEIGHTS["tool_arguments"]
-            details.append(f"arguments: {message}")
-
-        efficient, efficiency_detail = _tool_efficiency(case.required_tools, tool_calls)
-        if efficient:
-            rubric["tool_efficiency"] = RUBRIC_WEIGHTS["tool_efficiency"]
-        details.append(f"efficiency: {efficiency_detail}")
+    missing_tools = _missing_required_tools(case.required_tools, tool_calls)
+    if not missing_tools:
+        rubric["tool_selection"] = RUBRIC_WEIGHTS["tool_selection"]
+        details.append("required tools ok")
     else:
-        if not tool_calls:
-            rubric["tool_selection"] = RUBRIC_WEIGHTS["tool_selection"]
+        details.append(f"missing tools: {', '.join(missing_tools)}")
+
+    if case.argument_check is None:
+        rubric["tool_arguments"] = RUBRIC_WEIGHTS["tool_arguments"]
+    else:
+        ok, message = case.argument_check(tool_calls)
+        if ok:
             rubric["tool_arguments"] = RUBRIC_WEIGHTS["tool_arguments"]
-            rubric["tool_efficiency"] = RUBRIC_WEIGHTS["tool_efficiency"]
-            details.append("no tool required")
-        else:
-            details.append(f"unexpected tools: {', '.join(call['name'] for call in tool_calls)}")
+        details.append(f"arguments: {message}")
+
+    efficient, efficiency_detail = _tool_efficiency(case.required_tools, tool_calls)
+    if efficient:
+        rubric["tool_efficiency"] = RUBRIC_WEIGHTS["tool_efficiency"]
+    details.append(f"efficiency: {efficiency_detail}")
 
     hygienic, hygiene_detail = _output_hygiene(output)
     if hygienic:
@@ -667,59 +548,48 @@ def _text_after_last_think_block(text: str) -> str:
     return text[index + len(marker) :]
 
 
-def _has_numbers(
-    calls: tuple[dict[str, Any], ...],
-    tool_name: str,
-    expected: tuple[float, float],
-) -> tuple[bool, str]:
-    for call in calls:
-        if call["name"] != tool_name:
-            continue
-        args = call["arguments"]
-        values = sorted(float(value) for value in args.values() if _is_number(value))
-        if values == sorted(expected):
-            return True, "numeric arguments ok"
-    return False, f"expected numeric arguments {expected}"
+def _normalize_answer_text(text: str) -> str:
+    return text.lower().replace(",", "")
 
 
-def _checks_metric_delta(calls: tuple[dict[str, Any], ...]) -> tuple[bool, str]:
-    lookup_args = [call["arguments"] for call in calls if call["name"] == "lookup_metric"]
-    has_north = any(str(args.get("region", "")).lower() == "north" for args in lookup_args)
-    has_south = any(str(args.get("region", "")).lower() == "south" for args in lookup_args)
-    subtract_ok, _message = _has_numbers(calls, "subtract_numbers", (120, 90))
-    ok = has_north and has_south and subtract_ok
-    return ok, f"north_lookup={has_north} south_lookup={has_south} subtract_120_90={subtract_ok}"
+def _requires_refs(
+    *checks: tuple[str, str, str],
+) -> Callable[[tuple[dict[str, Any], ...]], tuple[bool, str]]:
+    def check(calls: tuple[dict[str, Any], ...]) -> tuple[bool, str]:
+        missing = [
+            f"{tool_name}.{key} contains {value}"
+            for tool_name, key, value in checks
+            if not _argument_contains(calls, tool_name, key, value)
+        ]
+        if missing:
+            return False, f"missing refs: {', '.join(missing)}"
+        return True, "argument refs ok"
+
+    return check
 
 
-def _has_argument_pair(
+def _argument_contains(
     calls: tuple[dict[str, Any], ...],
     tool_name: str,
     key: str,
     value: str,
 ) -> bool:
+    expected = value.lower()
     for call in calls:
         if call["name"] != tool_name:
             continue
         actual = call["arguments"].get(key)
-        if isinstance(actual, str) and actual.lower() == value.lower():
+        if _value_contains(actual, expected):
             return True
     return False
 
 
-def _requires_argument_pairs(
-    *pairs: tuple[str, str, str],
-) -> Callable[[tuple[dict[str, Any], ...]], tuple[bool, str]]:
-    def check(calls: tuple[dict[str, Any], ...]) -> tuple[bool, str]:
-        missing = [
-            f"{tool_name}.{key}={value}"
-            for tool_name, key, value in pairs
-            if not _has_argument_pair(calls, tool_name, key, value)
-        ]
-        if missing:
-            return False, f"missing argument pairs: {', '.join(missing)}"
-        return True, "argument pairs ok"
-
-    return check
+def _value_contains(actual: Any, expected: str) -> bool:
+    if isinstance(actual, str):
+        return actual.lower() == expected or expected in actual.lower()
+    if isinstance(actual, (list, tuple)):
+        return any(_value_contains(item, expected) for item in actual)
+    return str(actual).lower() == expected
 
 
 def _has_sql_terms(
@@ -729,21 +599,13 @@ def _has_sql_terms(
     sql_values = [
         str(call["arguments"].get("sql", "")).lower()
         for call in calls
-        if call["name"] == "read_only_sql"
+        if call["name"] == "run_sql"
     ]
     if not sql_values:
         return False, "no SQL argument"
     sql = sql_values[-1]
     missing = [term for term in terms if term not in sql]
     return not missing, "sql terms ok" if not missing else f"missing SQL terms: {missing}"
-
-
-def _is_number(value: Any) -> bool:
-    try:
-        float(value)
-        return True
-    except (TypeError, ValueError):
-        return False
 
 
 def model_result_to_dict(result: ModelResult) -> dict[str, Any]:
@@ -779,7 +641,10 @@ def model_result_to_dict(result: ModelResult) -> dict[str, Any]:
 def render_markdown(results: tuple[ModelResult, ...]) -> str:
     fastest = _fastest_available_duration(results)
     lines = [
-        "# Ollama Model Scorecard",
+        "# Ollama Analytics Demo Model Scorecard",
+        "",
+        "Harness: `demos.analytics` CSV source, profiler, semantic model, demo agent, "
+        "`AnalyticsToolset`, and `ModelsToolset`.",
         "",
         "| Model | Score | Pass Rate | Duration | Status |",
         "| --- | ---: | ---: | ---: | --- |",
@@ -809,12 +674,8 @@ def render_markdown(results: tuple[ModelResult, ...]) -> str:
     lines.extend(["| Component | Points | Meaning |", "| --- | ---: | --- |"])
     lines.append("| Answer correctness | 35 | Expected facts/terms appear in the final answer. |")
     lines.append("| Completion | 10 | Agent turn completed without hitting an error/step limit. |")
-    lines.append(
-        "| Tool selection | 20 | Required tools were called, or no unexpected tools were called. |"
-    )
-    lines.append(
-        "| Tool arguments | 20 | Tool arguments matched the requested metric, dimension, SQL terms, or numeric values. |"
-    )
+    lines.append("| Tool selection | 20 | Required analytics demo tools were called. |")
+    lines.append("| Tool arguments | 20 | Tool arguments used discovered table/column refs. |")
     lines.append("| Tool efficiency | 5 | No excessive repeated tool calls. |")
     lines.append(
         "| Output hygiene | 10 | Final answer is clean: no visible `<think>` trace and not empty. |"
@@ -844,15 +705,13 @@ def render_markdown(results: tuple[ModelResult, ...]) -> str:
         lines.append("")
     lines.extend(["## Selection Heuristic", ""])
     lines.append(
-        "- Prefer the highest score for the production analytics demo, but inspect analytics, "
-        "multi-tool, and complex-tool rows first; those are more predictive than simple echo tests."
+        "- Prefer the highest score for the production analytics demo, but inspect "
+        "modeling, forecast, SQL, and causal rows first."
     )
+    lines.append("- Use the fastest passing model when analytics-tool accuracy is tied.")
     lines.append(
-        "- Use the fastest passing model for local demos when analytics-tool accuracy is tied."
-    )
-    lines.append(
-        "- Treat failures to call required tools as blockers for the analytics demo, even if the "
-        "final answer looks plausible."
+        "- Treat failures to call required demo tools as blockers, even if the final "
+        "answer sounds plausible."
     )
     return "\n".join(lines)
 
