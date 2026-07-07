@@ -47,6 +47,14 @@ DEFAULT_OUTPUT_DIR = Path("model_scorecards")
 PASS_THRESHOLD = 80.0
 MAX_OLLAMA_CONTEXT = 65_536
 
+# Real-data suite: a 1.3M-row × 73-column casino asset table with trap columns
+# (coinIn vs coinInCarded, netWin vs grossWin vs theoWin) that punish schema-navigation
+# mistakes. Opt in with `--dataset redrock`.
+REDROCK_DEFAULT_DIR = "/Users/vaijanath.rao/ga_cache/training_data"
+REDROCK_FILE = "STATION_assetDaily_REDROCK.csv"
+REDROCK_TABLE = "asset_daily"
+REDROCK_MAX_TRAIN_ROWS = 50_000
+
 RUBRIC_WEIGHTS = {
     # Correctness is weighted highest: the prompts don't name a tool, and the
     # expected values are the *true* answers computed from the dataset. Getting the
@@ -121,8 +129,22 @@ def main() -> None:
     parser.add_argument("--num-ctx", type=int, default=MAX_OLLAMA_CONTEXT)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--max-steps", type=int, default=8)
+    parser.add_argument(
+        "--dataset",
+        choices=("synthetic", "redrock"),
+        default="synthetic",
+        help="synthetic = built-in deterministic CSV; redrock = real 1.3M-row casino data",
+    )
+    parser.add_argument("--redrock-dir", default=REDROCK_DEFAULT_DIR)
+    parser.add_argument(
+        "--max-train-rows",
+        type=int,
+        default=REDROCK_MAX_TRAIN_ROWS,
+        help="row cap for ML tools on large tables (0 = no cap)",
+    )
     args = parser.parse_args()
     num_ctx = min(args.num_ctx, MAX_OLLAMA_CONTEXT)
+    max_train_rows = args.max_train_rows or None
 
     results = anyio.run(
         run_scorecard,
@@ -131,22 +153,26 @@ def main() -> None:
         args.timeout,
         args.max_steps,
         num_ctx,
+        args.dataset,
+        args.redrock_dir,
+        max_train_rows,
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    json_path = args.output_dir / f"ollama_model_scorecard_{timestamp}.json"
-    md_path = args.output_dir / f"ollama_model_scorecard_{timestamp}.md"
+    json_path = args.output_dir / f"ollama_model_scorecard_{args.dataset}_{timestamp}.json"
+    md_path = args.output_dir / f"ollama_model_scorecard_{args.dataset}_{timestamp}.md"
 
     payload = {
         "generated_at": timestamp,
         "harness": "demos.analytics",
+        "dataset": args.dataset,
         "ollama_options": {"temperature": 0, "top_p": 0.1, "num_ctx": num_ctx},
         "models": [model_result_to_dict(result) for result in results],
     }
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    md_path.write_text(render_markdown(results), encoding="utf-8")
+    md_path.write_text(render_markdown(results, args.dataset), encoding="utf-8")
 
-    print(render_markdown(results))
+    print(render_markdown(results, args.dataset))
     print(f"\nWrote {json_path}")
     print(f"Wrote {md_path}")
 
@@ -157,84 +183,103 @@ async def run_scorecard(
     timeout: float,
     max_steps: int,
     num_ctx: int,
+    dataset: str = "synthetic",
+    redrock_dir: str = REDROCK_DEFAULT_DIR,
+    max_train_rows: int | None = None,
 ) -> tuple[ModelResult, ...]:
-    cases = build_cases()
-    results: list[ModelResult] = []
-    for model_name in models:
-        print(f"[scorecard] model={model_name} starting", flush=True)
-        model_start = perf_counter()
-        model = OllamaModelPort(
-            model_name,
-            base_url=base_url,
-            options={"temperature": 0, "top_p": 0.1, "num_ctx": num_ctx},
-            timeout=timeout,
-        )
-        try:
-            if not await model.has_model():
-                print(f"[scorecard] model={model_name} unavailable", flush=True)
+    # Build the dataset ONCE and reuse it read-only across every case and model. For the
+    # 4.7GB real data this is mandatory: re-importing per case would dominate the run.
+    print(f"[scorecard] dataset={dataset} building", flush=True)
+    source, semantic = build_dataset(dataset, redrock_dir)
+    try:
+        cases = build_cases(dataset, source)
+        print(f"[scorecard] dataset={dataset} ready: {len(cases)} cases", flush=True)
+        results: list[ModelResult] = []
+        for model_name in models:
+            print(f"[scorecard] model={model_name} starting", flush=True)
+            model_start = perf_counter()
+            model = OllamaModelPort(
+                model_name,
+                base_url=base_url,
+                options={"temperature": 0, "top_p": 0.1, "num_ctx": num_ctx},
+                timeout=timeout,
+            )
+            try:
+                if not await model.has_model():
+                    print(f"[scorecard] model={model_name} unavailable", flush=True)
+                    results.append(
+                        ModelResult(
+                            model=model_name,
+                            available=False,
+                            score=0,
+                            max_score=0,
+                            duration_seconds=perf_counter() - model_start,
+                            error="model is not available in Ollama",
+                        )
+                    )
+                    continue
+                case_results = []
+                for case in cases:
+                    print(f"[scorecard] model={model_name} case={case.name} starting", flush=True)
+                    case_result = await run_case(
+                        model_name, model, source, semantic, case, max_steps, max_train_rows
+                    )
+                    case_results.append(case_result)
+                    mark = "PASS" if case_result.passed else "FAIL"
+                    print(
+                        f"[scorecard] model={model_name} case={case.name} "
+                        f"{mark} score={case_result.score:.1f}/{case_result.max_score:.1f} "
+                        f"duration={case_result.duration_seconds:.1f}s",
+                        flush=True,
+                    )
                 results.append(
                     ModelResult(
                         model=model_name,
-                        available=False,
-                        score=0,
-                        max_score=0,
+                        available=True,
+                        score=sum(result.score for result in case_results),
+                        max_score=sum(result.max_score for result in case_results),
                         duration_seconds=perf_counter() - model_start,
-                        error="model is not available in Ollama",
+                        cases=tuple(case_results),
                     )
                 )
-                continue
-            case_results = []
-            for case in cases:
-                print(f"[scorecard] model={model_name} case={case.name} starting", flush=True)
-                case_result = await run_case(model_name, model, case, max_steps)
-                case_results.append(case_result)
-                mark = "PASS" if case_result.passed else "FAIL"
+                print(f"[scorecard] model={model_name} finished", flush=True)
+            except Exception as exc:
                 print(
-                    f"[scorecard] model={model_name} case={case.name} "
-                    f"{mark} score={case_result.score:.1f}/{case_result.max_score:.1f} "
-                    f"duration={case_result.duration_seconds:.1f}s",
+                    f"[scorecard] model={model_name} error={exc.__class__.__name__}: {exc}",
                     flush=True,
                 )
-            results.append(
-                ModelResult(
-                    model=model_name,
-                    available=True,
-                    score=sum(result.score for result in case_results),
-                    max_score=sum(result.max_score for result in case_results),
-                    duration_seconds=perf_counter() - model_start,
-                    cases=tuple(case_results),
+                results.append(
+                    ModelResult(
+                        model=model_name,
+                        available=True,
+                        score=0,
+                        max_score=sum(case_max_score(case) for case in cases),
+                        duration_seconds=perf_counter() - model_start,
+                        error=f"{exc.__class__.__name__}: {exc}",
+                    )
                 )
-            )
-            print(f"[scorecard] model={model_name} finished", flush=True)
-        except Exception as exc:
-            print(f"[scorecard] model={model_name} error={exc.__class__.__name__}: {exc}", flush=True)
-            results.append(
-                ModelResult(
-                    model=model_name,
-                    available=True,
-                    score=0,
-                    max_score=sum(case_max_score(case) for case in cases),
-                    duration_seconds=perf_counter() - model_start,
-                    error=f"{exc.__class__.__name__}: {exc}",
-                )
-            )
+    finally:
+        source.close()
     return tuple(results)
 
 
 async def run_case(
     model_name: str,
     model: OllamaModelPort,
+    source: CsvSource,
+    semantic: SemanticModel,
     case: ScorecardCase,
     max_steps: int,
+    max_train_rows: int | None = None,
 ) -> CaseResult:
     observer = RecordingObserver()
-    source: CsvSource | None = None
     started = perf_counter()
     output = ""
     stop_reason = ""
     try:
-        source, semantic = build_demo_dataset()
-        agent = create_agent(source, model, semantic, observers=[observer])
+        agent = create_agent(
+            source, model, semantic, observers=[observer], max_train_rows=max_train_rows
+        )
         agent.max_steps = max_steps
         context = RequestContext(session_id=f"analytics-scorecard-{model_name}-{case.name}")
         response = await agent.run(AgentRequest(case.prompt, context))
@@ -243,9 +288,6 @@ async def run_case(
     except Exception as exc:
         output = f"{exc.__class__.__name__}: {exc}"
         stop_reason = "error"
-    finally:
-        if source is not None:
-            source.close()
 
     tool_calls = tuple(
         {"name": call.name, "arguments": call.arguments} for call in observer.tool_calls
@@ -272,11 +314,36 @@ async def run_case(
     )
 
 
+def build_dataset(dataset: str, redrock_dir: str) -> tuple[CsvSource, SemanticModel]:
+    if dataset == "redrock":
+        return build_redrock_dataset(redrock_dir)
+    return build_demo_dataset()
+
+
 def build_demo_dataset() -> tuple[CsvSource, SemanticModel]:
     tmp_dir = tempfile.TemporaryDirectory()
     csv_path = Path(tmp_dir.name) / "scorecard_sales.csv"
     csv_path.write_text(_scorecard_csv(), encoding="utf-8")
     source = CsvSource(named_csvs={"scorecard_sales": csv_path})
+    source._scorecard_tmp_dir = tmp_dir  # type: ignore[attr-defined]
+    profile = profile_dataset(source)
+    semantic = SemanticModel.from_profile(profile)
+    return source, semantic
+
+
+def build_redrock_dataset(redrock_dir: str) -> tuple[CsvSource, SemanticModel]:
+    """Import the real casino asset table into a file-backed DuckDB (out-of-core) once.
+
+    ~960MB / 1.3M rows / 73 columns — imports in seconds, then every case queries it
+    read-only. The rich, trap-heavy schema is the point: it is what actually separates a
+    9B model from a 31B one.
+    """
+    csv_path = Path(redrock_dir) / REDROCK_FILE
+    if not csv_path.exists():
+        raise SystemExit(f"REDROCK data not found: {csv_path}")
+    tmp_dir = tempfile.TemporaryDirectory()
+    db_path = Path(tmp_dir.name) / "redrock.duckdb"
+    source = CsvSource(db_path=str(db_path), named_csvs={REDROCK_TABLE: csv_path})
     source._scorecard_tmp_dir = tmp_dir  # type: ignore[attr-defined]
     profile = profile_dataset(source)
     semantic = SemanticModel.from_profile(profile)
@@ -302,46 +369,42 @@ def _tier(model: str) -> str:
     return "cloud" if "cloud" in model.lower() else "local"
 
 
-def _ground_truth() -> dict[str, str]:
+def _ground_truth_synthetic(source: CsvSource) -> dict[str, str]:
     """Compute the true answers from the deterministic scorecard CSV, so correctness
     is scored against real values that can't drift from the data."""
-    source, _ = build_demo_dataset()
-    try:
-        q = source.native_query
-        region = q(
-            "SELECT region, SUM(revenue) AS r FROM scorecard_sales "
-            "GROUP BY region ORDER BY r DESC LIMIT 1"
-        )[0]
-        product = q(
-            "SELECT product, SUM(profit) AS p FROM scorecard_sales "
-            "GROUP BY product ORDER BY p DESC LIMIT 1"
-        )[0]
-        ppu = q(
-            "SELECT product, SUM(profit) / SUM(units) AS ppu FROM scorecard_sales "
-            "GROUP BY product ORDER BY ppu DESC LIMIT 1"
-        )[0]
-        ab = {
-            row["campaign"]: float(row["m"])
-            for row in q(
-                "SELECT campaign, AVG(revenue) AS m FROM scorecard_sales "
-                "WHERE campaign IN ('test', 'control') GROUP BY campaign"
-            )
-        }
-        margin = float(q("SELECT 100.0 * SUM(profit) / SUM(revenue) AS m FROM scorecard_sales")[0]["m"])
-        test_rev = int(q("SELECT SUM(revenue) AS r FROM scorecard_sales WHERE campaign = 'test'")[0]["r"])
-        best_margin = q(
-            "SELECT product FROM scorecard_sales GROUP BY product "
-            "ORDER BY SUM(profit) / SUM(revenue) DESC LIMIT 1"
-        )[0]["product"]
-        months = q(
-            "SELECT date_trunc('month', day) AS mo, SUM(revenue) AS r "
-            "FROM scorecard_sales GROUP BY mo ORDER BY mo"
+    q = source.native_query
+    region = q(
+        "SELECT region, SUM(revenue) AS r FROM scorecard_sales "
+        "GROUP BY region ORDER BY r DESC LIMIT 1"
+    )[0]
+    product = q(
+        "SELECT product, SUM(profit) AS p FROM scorecard_sales "
+        "GROUP BY product ORDER BY p DESC LIMIT 1"
+    )[0]
+    ppu = q(
+        "SELECT product, SUM(profit) / SUM(units) AS ppu FROM scorecard_sales "
+        "GROUP BY product ORDER BY ppu DESC LIMIT 1"
+    )[0]
+    ab = {
+        row["campaign"]: float(row["m"])
+        for row in q(
+            "SELECT campaign, AVG(revenue) AS m FROM scorecard_sales "
+            "WHERE campaign IN ('test', 'control') GROUP BY campaign"
         )
-        first_r, last_r = float(months[0]["r"]), float(months[-1]["r"])
-        mom_pct = 100.0 * (last_r - first_r) / first_r
-        top2 = q("SELECT region FROM scorecard_sales GROUP BY region ORDER BY SUM(revenue) DESC LIMIT 2")
-    finally:
-        source.close()
+    }
+    margin = float(q("SELECT 100.0 * SUM(profit) / SUM(revenue) AS m FROM scorecard_sales")[0]["m"])
+    test_rev = int(q("SELECT SUM(revenue) AS r FROM scorecard_sales WHERE campaign = 'test'")[0]["r"])
+    best_margin = q(
+        "SELECT product FROM scorecard_sales GROUP BY product "
+        "ORDER BY SUM(profit) / SUM(revenue) DESC LIMIT 1"
+    )[0]["product"]
+    months = q(
+        "SELECT date_trunc('month', day) AS mo, SUM(revenue) AS r "
+        "FROM scorecard_sales GROUP BY mo ORDER BY mo"
+    )
+    first_r, last_r = float(months[0]["r"]), float(months[-1]["r"])
+    mom_pct = 100.0 * (last_r - first_r) / first_r
+    top2 = q("SELECT region FROM scorecard_sales GROUP BY region ORDER BY SUM(revenue) DESC LIMIT 2")
     return {
         "top_region": str(region["region"]),
         "top_region_revenue": str(int(region["r"])),
@@ -357,8 +420,14 @@ def _ground_truth() -> dict[str, str]:
     }
 
 
-def build_cases() -> tuple[ScorecardCase, ...]:
-    gt = _ground_truth()
+def build_cases(dataset: str, source: CsvSource) -> tuple[ScorecardCase, ...]:
+    if dataset == "redrock":
+        return build_redrock_cases(source)
+    return build_synthetic_cases(source)
+
+
+def build_synthetic_cases(source: CsvSource) -> tuple[ScorecardCase, ...]:
+    gt = _ground_truth_synthetic(source)
     return (
         ScorecardCase(
             name="schema_discovery",
@@ -517,6 +586,127 @@ def build_cases() -> tuple[ScorecardCase, ...]:
     )
 
 
+def _ground_truth_redrock(source: CsvSource) -> dict[str, str]:
+    """True answers computed live from the real casino asset table.
+
+    Answers are names / small ints / precise percents so exact-match scoring is fair on
+    huge production numbers (no giant sums to recite). The discrimination lives in picking
+    the RIGHT column among near-duplicates (coinIn vs *Carded; netWin vs grossWin vs
+    theoWin) and the right aggregation — not in reciting a 10-digit total.
+    """
+    q = source.native_query
+    t = REDROCK_TABLE
+    top2_mfr = q(
+        f"SELECT manufacturer m FROM {t} GROUP BY 1 ORDER BY SUM(coinIn) DESC LIMIT 2"
+    )
+    n_titles = int(q(f"SELECT COUNT(DISTINCT gameTitle) n FROM {t}")[0]["n"])
+    konami_pb = float(
+        q(f"SELECT AVG(paybackPercent) p FROM {t} WHERE manufacturer = 'KONAMI'")[0]["p"]
+    )
+    hold = float(q(f"SELECT 100.0 * SUM(netWin) / SUM(coinIn) h FROM {t}")[0]["h"])
+    top_zone = q(
+        f"SELECT zone z FROM {t} GROUP BY 1 ORDER BY COUNT(DISTINCT assetId) DESC LIMIT 1"
+    )[0]["z"]
+    lease = {
+        bool(r["k"]): float(r["m"])
+        for r in q(f"SELECT isLeased k, AVG(netWin) m FROM {t} GROUP BY 1")
+    }
+    top_game = q(
+        f"SELECT gameTitle g FROM {t} GROUP BY 1 ORDER BY SUM(theoWin) DESC LIMIT 1"
+    )[0]["g"]
+    return {
+        "top_mfr_1": str(top2_mfr[0]["m"]),
+        "top_mfr_2": str(top2_mfr[1]["m"]),
+        "distinct_titles": str(n_titles),
+        "konami_payback": str(round(konami_pb)),
+        # netWin/coinIn = 5.97 here; grossWin or theoWin numerators give a different number,
+        # so precise digits (not a bare rounded "6") are what prove the right column.
+        "hold_terms": f"{hold:.2f}|{hold:.1f}|5.9",
+        "top_zone": str(top_zone),
+        "leased_winner": "leased" if lease.get(True, 0.0) > lease.get(False, 0.0) else "owned",
+        "top_game_theowin": str(top_game).lower(),
+    }
+
+
+def build_redrock_cases(source: CsvSource) -> tuple[ScorecardCase, ...]:
+    gt = _ground_truth_redrock(source)
+    return (
+        ScorecardCase(
+            name="top_two_manufacturers",
+            category="redrock-query",
+            prompt="List the top two manufacturers by total coin-in.",
+            expected_terms=(gt["top_mfr_1"], gt["top_mfr_2"]),
+            tool_groups=(("run_query", "run_sql"),),
+            notes="Ordered top-2 over 73 columns; both manufacturer names must appear.",
+        ),
+        ScorecardCase(
+            name="distinct_game_titles",
+            category="redrock-count",
+            prompt="How many distinct game titles are in this data?",
+            expected_terms=(gt["distinct_titles"],),
+            tool_groups=(("run_sql", "run_query"),),
+            notes="COUNT(DISTINCT gameTitle) — must find the right column among many.",
+        ),
+        ScorecardCase(
+            name="konami_avg_payback",
+            category="redrock-filter",
+            prompt="What is the average payback percent for KONAMI machines? Give a whole number.",
+            expected_terms=(gt["konami_payback"],),
+            tool_groups=(("run_query", "run_sql"),),
+            notes="Filter manufacturer='KONAMI' + AVG(paybackPercent).",
+        ),
+        ScorecardCase(
+            name="overall_hold_pct",
+            category="redrock-ratio",
+            prompt=(
+                "What is the overall hold percentage — net win divided by coin-in — "
+                "across all machines?"
+            ),
+            expected_terms=(gt["hold_terms"],),
+            tool_groups=(("run_sql",),),
+            notes="Ratio → run_sql. Trap: netWin/coinIn (5.97%), not grossWin (6.38%) or theoWin.",
+        ),
+        ScorecardCase(
+            name="top_zone_by_machines",
+            category="redrock-distinct",
+            prompt="Which zone has the most distinct machines (unique asset IDs)?",
+            expected_terms=(gt["top_zone"],),
+            tool_groups=(("run_sql", "run_query"),),
+            notes="Trap: COUNT(DISTINCT assetId), not COUNT(*) rows.",
+        ),
+        ScorecardCase(
+            name="leased_vs_owned_netwin",
+            category="redrock-compare",
+            prompt=(
+                "Do leased machines earn more net win on average than owned "
+                "(non-leased) machines?"
+            ),
+            expected_terms=(gt["leased_winner"], "more|higher|greater"),
+            tool_groups=(("run_query", "run_sql"),),
+            notes="Group by isLeased + AVG(netWin); must name the correct side and direction.",
+        ),
+        ScorecardCase(
+            name="top_game_by_theowin",
+            category="redrock-argmax",
+            prompt="Which game title has the highest total theoretical win?",
+            expected_terms=(gt["top_game_theowin"],),
+            tool_groups=(("run_query", "run_sql"),),
+            notes="Trap: theoWin, not coinIn (which picks a different game). Argmax over 863 titles.",
+        ),
+        ScorecardCase(
+            name="leasing_causation_honesty",
+            category="redrock-honesty",
+            prompt="Prove that leasing a machine causes it to earn more.",
+            expected_terms=(
+                "cannot|can't|does not prove|not prove|no proof|observational|confound|"
+                "randomized|correlation",
+            ),
+            tool_groups=(),
+            notes="Honesty: must refuse to claim causation from observational data.",
+        ),
+    )
+
+
 def score_case(
     case: ScorecardCase,
     output: str,
@@ -670,14 +860,28 @@ def model_result_to_dict(result: ModelResult) -> dict[str, Any]:
     }
 
 
-def render_markdown(results: tuple[ModelResult, ...]) -> str:
+def render_markdown(results: tuple[ModelResult, ...], dataset: str = "synthetic") -> str:
     fastest = _fastest_available_duration(results)
+    if dataset == "redrock":
+        data_note = (
+            "Dataset: **real casino asset data** (`STATION_assetDaily_REDROCK.csv`, ~1.3M rows "
+            "× 73 columns) imported into a file-backed DuckDB. The schema has trap columns "
+            "(coinIn vs coinInCarded; netWin vs grossWin vs theoWin) that punish column-picking "
+            "mistakes — this is the hard suite meant to separate a 9B from a 31B model."
+        )
+    else:
+        data_note = (
+            "Dataset: built-in deterministic synthetic CSV (`scorecard_sales`). Both models "
+            "tend to tie near 100% here — use `--dataset redrock` for the discriminating suite."
+        )
     lines = [
         "# Ollama Analytics Demo Model Scorecard",
         "",
         "Harness: `demos.analytics` CSV source, profiler, semantic model, demo agent, "
         "`AnalyticsToolset`, and `ModelsToolset`. Prompts are natural questions (the tool is "
         "not named); correctness is scored against ground truth computed from the data.",
+        "",
+        data_note,
         "",
         "| Model | Tier | Score | Pass Rate | Duration | Status |",
         "| --- | --- | ---: | ---: | ---: | --- |",
