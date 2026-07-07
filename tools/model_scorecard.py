@@ -153,9 +153,22 @@ def main() -> None:
         default=REDROCK_MAX_TRAIN_ROWS,
         help="row cap for ML tools on large tables (0 = no cap)",
     )
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--top-p", type=float, default=0.1)
+    parser.add_argument("--top-k", type=int, default=0, help="0 = omit (Ollama default)")
     args = parser.parse_args()
     num_ctx = min(args.num_ctx, MAX_OLLAMA_CONTEXT)
     max_train_rows = args.max_train_rows or None
+
+    # One options dict used for BOTH the model calls and the recorded payload, so the
+    # scorecard always reflects the exact sampling settings that produced it.
+    options: dict[str, Any] = {
+        "temperature": args.temperature,
+        "top_p": args.top_p,
+        "num_ctx": num_ctx,
+    }
+    if args.top_k > 0:
+        options["top_k"] = args.top_k
 
     results = anyio.run(
         run_scorecard,
@@ -163,7 +176,7 @@ def main() -> None:
         args.base_url,
         args.timeout,
         args.max_steps,
-        num_ctx,
+        options,
         args.dataset,
         args.redrock_dir,
         max_train_rows,
@@ -177,7 +190,7 @@ def main() -> None:
         "generated_at": timestamp,
         "harness": "demos.analytics",
         "dataset": args.dataset,
-        "ollama_options": {"temperature": 0, "top_p": 0.1, "num_ctx": num_ctx},
+        "ollama_options": options,
         "models": [model_result_to_dict(result) for result in results],
     }
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -193,7 +206,7 @@ async def run_scorecard(
     base_url: str,
     timeout: float,
     max_steps: int,
-    num_ctx: int,
+    options: dict[str, Any],
     dataset: str = "synthetic",
     redrock_dir: str = REDROCK_DEFAULT_DIR,
     max_train_rows: int | None = None,
@@ -212,7 +225,7 @@ async def run_scorecard(
             model = OllamaModelPort(
                 model_name,
                 base_url=base_url,
-                options={"temperature": 0, "top_p": 0.1, "num_ctx": num_ctx},
+                options=dict(options),
                 timeout=timeout,
             )
             try:
