@@ -83,6 +83,10 @@ class ScorecardCase:
     expected_terms: tuple[str, ...]  # ground-truth tokens; each entry is a `a|b|c` synonym set
     tool_groups: tuple[tuple[str, ...], ...]  # each group is satisfied if ANY listed tool is called
     notes: str = ""
+    # Multi-turn cases: a sequence of follow-up prompts run on ONE session so history
+    # carries. The LAST turn is what's scored, and its answer is designed to depend on
+    # resolving "that / those / it" against earlier turns (context-free answer differs).
+    turns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,10 +292,16 @@ async def run_case(
             source, model, semantic, observers=[observer], max_train_rows=max_train_rows
         )
         agent.max_steps = max_steps
+        # One agent + one session_id across all turns, so the framework's conversation store
+        # carries history. For single-turn cases this is just one prompt. The LAST turn's
+        # answer is what gets scored; the observer accumulates tool calls across turns.
         context = RequestContext(session_id=f"analytics-scorecard-{model_name}-{case.name}")
-        response = await agent.run(AgentRequest(case.prompt, context))
-        output = response.output
-        stop_reason = response.stop_reason
+        for turn_prompt in case.turns or (case.prompt,):
+            response = await agent.run(AgentRequest(turn_prompt, context))
+            output = response.output
+            stop_reason = response.stop_reason
+            if stop_reason != "completed":
+                break  # a broken turn breaks the chain — stop and score what we have
     except Exception as exc:
         output = f"{exc.__class__.__name__}: {exc}"
         stop_reason = "error"
@@ -646,6 +656,15 @@ def _ground_truth_redrock(source: CsvSource) -> dict[str, str]:
         f"WHERE s.gameTitle = '{game_lit}' GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1"
     )[0]["ag"]
     gen = str(top_gen_label).split(")")[-1].strip().lower()  # "(42-57) Gen X" -> "gen x"
+
+    # --- multi-turn ground truth: later-turn answers that DIFFER from the context-free
+    # answer, so getting them right requires resolving "that / and X?" against history. ---
+    mfr2 = str(top2_mfr[1]["m"]).replace("'", "''")  # 2nd manufacturer (drill-down target)
+    top_mfr2_game = q(
+        f"SELECT gameTitle g FROM {t} WHERE manufacturer = '{mfr2}' "
+        "GROUP BY 1 ORDER BY SUM(coinIn) DESC LIMIT 1"
+    )[0]["g"]
+    igt_pb = float(q(f"SELECT AVG(paybackPercent) p FROM {t} WHERE manufacturer = 'IGT'")[0]["p"])
     return {
         "top_mfr_1": str(top2_mfr[0]["m"]),
         "top_mfr_2": str(top2_mfr[1]["m"]),
@@ -658,9 +677,11 @@ def _ground_truth_redrock(source: CsvSource) -> dict[str, str]:
         "leased_winner": "leased" if lease.get(True, 0.0) > lease.get(False, 0.0) else "owned",
         "top_game_theowin": str(top_game).lower(),
         "chairman_club": str(chairman),
-        # ponytail: winner is NV; map the one code to its name so "Nevada" matches cleanly.
-        "top_state": "nevada" if str(top_state) == "NV" else str(top_state).lower(),
+        # Accept both the code and the name — "NV" is a correct answer, not a miss.
+        "top_state": "nevada|nv" if str(top_state) == "NV" else str(top_state).lower(),
         "top_game_generation": f"{gen}|generation x" if "gen x" in gen else gen,
+        "mt_drilldown_game": str(top_mfr2_game).lower(),
+        "igt_payback": f"{igt_pb:.1f}|{round(igt_pb)}",
     }
 
 
@@ -768,6 +789,34 @@ def build_redrock_cases(source: CsvSource) -> tuple[ScorecardCase, ...]:
             tool_groups=(("run_sql", "run_query"),),
             notes="player_visits demographics: COUNT(DISTINCT playerId) by state.",
         ),
+        # --- multi-turn cases: history must carry across turns (long-context territory) ---
+        ScorecardCase(
+            name="mt_manufacturer_drilldown",
+            category="redrock-multiturn",
+            prompt="(multi-turn) 2nd manufacturer -> its top game",
+            turns=(
+                "Which manufacturer has the second-highest total coin-in?",
+                "For that manufacturer, which game title has the highest total coin-in?",
+            ),
+            expected_terms=(gt["mt_drilldown_game"],),
+            tool_groups=(("run_sql", "run_query"),),
+            notes=(
+                "Turn 2 must resolve 'that manufacturer' = the 2nd (ARISTOCRAT); its top game "
+                "differs from the overall top game, so a context-less answer is wrong."
+            ),
+        ),
+        ScorecardCase(
+            name="mt_payback_ellipsis",
+            category="redrock-multiturn",
+            prompt="(multi-turn) KONAMI payback -> 'And IGT?'",
+            turns=(
+                "What is the average payback percent for KONAMI machines?",
+                "And IGT?",
+            ),
+            expected_terms=(gt["igt_payback"],),
+            tool_groups=(("run_sql", "run_query"),),
+            notes="Turn 2 is elliptical ('And IGT?') — meaningless unless turn 1 is remembered.",
+        ),
     )
 
 
@@ -816,7 +865,8 @@ def score_case(
         rubric["tool_efficiency"] = RUBRIC_WEIGHTS["tool_efficiency"]
         details.append("efficiency: n/a")
     else:
-        efficient, efficiency_detail = _tool_efficiency(case.tool_groups, tool_calls)
+        n_turns = len(case.turns) or 1
+        efficient, efficiency_detail = _tool_efficiency(case.tool_groups, tool_calls, n_turns)
         if efficient:
             rubric["tool_efficiency"] = RUBRIC_WEIGHTS["tool_efficiency"]
         details.append(f"efficiency: {efficiency_detail}")
@@ -853,13 +903,16 @@ def _missing_tool_groups(
 def _tool_efficiency(
     tool_groups: tuple[tuple[str, ...], ...],
     tool_calls: tuple[dict[str, Any], ...],
+    n_turns: int = 1,
 ) -> tuple[bool, str]:
     actual_count = len(tool_calls)
     if actual_count == 0:
         return False, "no tool calls"
-    allowed_count = len(tool_groups) + 1
+    # Allow roughly one tool call per required group per turn (multi-turn cases legitimately
+    # call a tool on each turn).
+    allowed_count = len(tool_groups) + n_turns
     counts = Counter(call["name"] for call in tool_calls)
-    repeated = [name for name, count in counts.items() if count > 2]
+    repeated = [name for name, count in counts.items() if count > 2 * n_turns]
     if actual_count > allowed_count:
         return False, f"too many calls ({actual_count} > {allowed_count})"
     if repeated:
