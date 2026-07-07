@@ -45,7 +45,9 @@ from python_ai_agents.adapters import OllamaModelPort
 DEFAULT_MODELS = ("gemma4:31b-cloud", "ornith:latest")
 DEFAULT_OUTPUT_DIR = Path("model_scorecards")
 PASS_THRESHOLD = 80.0
-MAX_OLLAMA_CONTEXT = 65_536
+# Both candidate models support 262K ctx. This benchmark only uses ~3K tokens of prompt,
+# so this cap is headroom for large production schemas, not a limit the suite hits.
+MAX_OLLAMA_CONTEXT = 131_072
 
 # Real-data suite: three related casino tables (11.5M rows, ~170 columns total) with trap
 # columns (coinIn vs coinInCarded, netWin vs grossWin vs theoWin) AND cross-table joins
