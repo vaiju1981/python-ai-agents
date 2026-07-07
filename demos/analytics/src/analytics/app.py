@@ -14,6 +14,7 @@ insights are derived from those results, never invented.
 from __future__ import annotations
 
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -68,6 +69,10 @@ class _RowCapture(NoopAgentObserver):
     async def on_tool_result(self, tool_name: str, result: ToolResult, latency: object) -> None:
         if result.error:
             return
+        # Prefer the tool's structured payload (exact); fall back to parsing framed text.
+        if isinstance(result.data, list) and result.data and isinstance(result.data[0], dict):
+            self.rows = result.data
+            return
         rows = _extract_rows(result.content)
         if rows:
             self.rows = rows
@@ -91,18 +96,17 @@ def _extract_rows(text: object) -> list[dict] | None:
     return None
 
 
-def _load_dataset(named_csvs: dict[str, Path], *, refine: bool) -> None:
-    """Import CSVs, profile, model, and cache everything once per dataset."""
-    sig = tuple(sorted((n, p.stat().st_size) for n, p in named_csvs.items()))
-    if st.session_state.get("data_sig") == sig and "source" in st.session_state:
-        return
-
+def _load_dataset(named_csvs: dict[str, Path], sig: tuple, tmp_dir: Path, *, refine: bool) -> None:
+    """Import CSVs, profile, model, and cache once per dataset; reclaim the prior dataset."""
     old = st.session_state.get("source")
     if old is not None:
         try:
             old.close()
         except Exception:
             pass
+    old_dir = st.session_state.get("tmp_dir")
+    if old_dir is not None:
+        shutil.rmtree(old_dir, ignore_errors=True)
 
     source = CsvSource(named_csvs=named_csvs)
     profile = profile_dataset(source)
@@ -116,6 +120,7 @@ def _load_dataset(named_csvs: dict[str, Path], *, refine: bool) -> None:
 
     st.session_state.update(
         data_sig=sig,
+        tmp_dir=tmp_dir,
         source=source,
         profile=profile,
         semantic=semantic,
@@ -165,17 +170,21 @@ def main() -> None:
         st.header("Data")
         uploaded = st.file_uploader("Upload CSV files", type="csv", accept_multiple_files=True)
         if uploaded:
-            named_csvs: dict[str, Path] = {}
-            tmp_dir = Path(tempfile.mkdtemp())
-            for f in uploaded:
-                path = tmp_dir / f.name
-                path.write_bytes(f.getbuffer())
-                named_csvs[Path(f.name).stem] = path
-            with st.spinner("Importing into DuckDB and profiling..."):
-                _load_dataset(named_csvs, refine=refine)
+            # Signature from name+size so we only re-import (and only mkdtemp) when the
+            # upload actually changes — Streamlit reruns this block on every interaction.
+            sig = tuple(sorted((f.name, f.size) for f in uploaded))
+            if st.session_state.get("data_sig") != sig:
+                tmp_dir = Path(tempfile.mkdtemp())
+                named_csvs: dict[str, Path] = {}
+                for f in uploaded:
+                    path = tmp_dir / f.name
+                    path.write_bytes(f.getbuffer())
+                    named_csvs[Path(f.name).stem] = path
+                with st.spinner("Importing into DuckDB and profiling..."):
+                    _load_dataset(named_csvs, sig, tmp_dir, refine=refine)
             sm = st.session_state.semantic
             st.success(
-                f"Loaded {len(named_csvs)} table(s) · {len(sm.metrics)} metric(s) · "
+                f"{len(st.session_state.profile.tables)} table(s) · {len(sm.metrics)} metric(s) · "
                 f"{len(sm.relationships)} relationship(s)."
             )
 

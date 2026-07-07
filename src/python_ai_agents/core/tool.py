@@ -29,10 +29,11 @@ class ToolSpec:
 class ToolResult:
     content: str
     error: bool = False
+    data: Any = None  # optional structured payload (e.g. rows) for UIs; never sent to the model
 
     @classmethod
-    def ok(cls, content: str) -> ToolResult:
-        return cls(content=content)
+    def ok(cls, content: str, data: Any = None) -> ToolResult:
+        return cls(content=content, data=data)
 
     @classmethod
     def failed(cls, content: str) -> ToolResult:

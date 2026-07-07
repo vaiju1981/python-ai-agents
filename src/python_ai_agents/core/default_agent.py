@@ -200,7 +200,9 @@ class DefaultAgent:
             await self._notify("on_tool_result", name, failed, _duration_since(tool_start))
             return failed
         await self._record(AuditEvent.now("tool.end", request.context, f"tool={name}"))
-        capped = ToolResult(outcome.content[: self.max_tool_result_chars], outcome.error)
+        capped = ToolResult(
+            outcome.content[: self.max_tool_result_chars], outcome.error, outcome.data
+        )
         await self._notify("on_tool_result", name, capped, _duration_since(tool_start))
         return capped
 

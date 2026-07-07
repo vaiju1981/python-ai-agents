@@ -62,7 +62,7 @@ class AnalyticsToolset:
                 spec = _parse_query_spec(arguments)
                 sql = plan(self.model, spec)
                 rows = self.source.native_query_with_limit(sql, 500)
-                return ToolResult.ok(_format_rows(sql, rows))
+                return ToolResult.ok(_format_rows(sql, rows), data=rows)
             except Exception as exc:
                 return ToolResult.failed(f"run_query failed: {exc}")
 
@@ -159,7 +159,8 @@ class AnalyticsToolset:
                 )
                 rows = self.source.native_query_with_limit(sql, 100)
                 return ToolResult.ok(
-                    _frame("trend", json.dumps(rows, default=str)[:MAX_RESULT_CHARS])
+                    _frame("trend", json.dumps(rows, default=str)[:MAX_RESULT_CHARS]),
+                    data=rows,
                 )
             except Exception as exc:
                 return ToolResult.failed(f"trend failed: {exc}")
@@ -279,7 +280,8 @@ class AnalyticsToolset:
                     20,
                 )
                 return ToolResult.ok(
-                    _frame("outliers", json.dumps(rows, default=str)[:MAX_RESULT_CHARS])
+                    _frame("outliers", json.dumps(rows, default=str)[:MAX_RESULT_CHARS]),
+                    data=rows,
                 )
             except Exception as exc:
                 return ToolResult.failed(f"outliers failed: {exc}")
@@ -363,7 +365,8 @@ class AnalyticsToolset:
                     return ToolResult.failed(reason)
                 rows = self.source.native_query_with_limit(sql, 500)
                 return ToolResult.ok(
-                    _frame("run_sql", json.dumps(rows, default=str)[:MAX_RESULT_CHARS])
+                    _frame("run_sql", json.dumps(rows, default=str)[:MAX_RESULT_CHARS]),
+                    data=rows,
                 )
             except Exception as exc:
                 return ToolResult.failed(f"run_sql failed: {exc}")
