@@ -347,8 +347,8 @@ def build_cases() -> tuple[ScorecardCase, ...]:
             category="analytics-schema",
             prompt="What table is in this dataset, and what are two useful metrics to analyze?",
             expected_terms=("scorecard_sales", "revenue|profit|cost|units|visits"),
-            tool_groups=(("describe_dataset", "run_sql"),),
-            notes="Natural schema question; the model must reach for a discovery tool.",
+            tool_groups=(),  # the schema is already in the prompt — answering directly is correct
+            notes="Scored on the answer only; no tool is required when the schema is in context.",
         ),
         ScorecardCase(
             name="revenue_by_region",
@@ -469,13 +469,18 @@ def score_case(
     else:
         rubric["answer"] = RUBRIC_WEIGHTS["answer"]
 
-    # Tool selection: each group is satisfied if ANY of its tools was called.
-    missing_groups = _missing_tool_groups(case.tool_groups, tool_calls)
-    if not missing_groups:
+    # Tool selection: each group is satisfied if ANY of its tools was called. A case
+    # with no groups is answerable from context (schema is in the prompt), so it's full.
+    if not case.tool_groups:
         rubric["tool_selection"] = RUBRIC_WEIGHTS["tool_selection"]
-        details.append("tool ok")
+        details.append("tool: n/a (answerable from context)")
     else:
-        details.append("missing tool (any of): " + "; ".join("/".join(g) for g in missing_groups))
+        missing_groups = _missing_tool_groups(case.tool_groups, tool_calls)
+        if not missing_groups:
+            rubric["tool_selection"] = RUBRIC_WEIGHTS["tool_selection"]
+            details.append("tool ok")
+        else:
+            details.append("missing tool (any of): " + "; ".join("/".join(g) for g in missing_groups))
 
     if stop_reason == "completed":
         rubric["completion"] = RUBRIC_WEIGHTS["completion"]
@@ -483,10 +488,14 @@ def score_case(
     else:
         details.append(f"stop_reason={stop_reason}")
 
-    efficient, efficiency_detail = _tool_efficiency(case.tool_groups, tool_calls)
-    if efficient:
+    if not case.tool_groups:
         rubric["tool_efficiency"] = RUBRIC_WEIGHTS["tool_efficiency"]
-    details.append(f"efficiency: {efficiency_detail}")
+        details.append("efficiency: n/a")
+    else:
+        efficient, efficiency_detail = _tool_efficiency(case.tool_groups, tool_calls)
+        if efficient:
+            rubric["tool_efficiency"] = RUBRIC_WEIGHTS["tool_efficiency"]
+        details.append(f"efficiency: {efficiency_detail}")
 
     hygienic, hygiene_detail = _output_hygiene(output)
     if hygienic:
@@ -667,11 +676,25 @@ def render_markdown(results: tuple[ModelResult, ...]) -> str:
     best_local = _best_in_tier(results, "local")
     best_cloud = _best_in_tier(results, "cloud")
     if best_local:
-        lines.append(f"- Best **local** model: `{best_local.model}` ({best_local.percent * 100:.1f}%).")
+        lines.append(
+            f"- Best **local** model: `{best_local.model}` — "
+            f"{best_local.percent * 100:.1f}% at {best_local.duration_seconds:.0f}s."
+        )
     if best_cloud:
-        lines.append(f"- Best **cloud** model: `{best_cloud.model}` ({best_cloud.percent * 100:.1f}%).")
-    lines.append("- Pick within the tier you can actually deploy; only compare across tiers for reference.")
-    lines.append("- Prefer higher correctness; break ties on the modeling/forecast/causal rows, then speed.")
+        lines.append(
+            f"- Best **cloud** model: `{best_cloud.model}` — "
+            f"{best_cloud.percent * 100:.1f}% at {best_cloud.duration_seconds:.0f}s."
+        )
+    lines.append(
+        "- When correctness is close, **latency decides**. A local model shares the laptop's "
+        "CPU/RAM with the DuckDB/pandas/sklearn workload, so real-world latency is worse than "
+        "measured here (which ran without that contention)."
+    )
+    lines.append(
+        "- What leaves the machine: **cloud** sees the schema and capped tool results (never the "
+        "raw rows); **local** sends nothing off-box. Choose fully local only when even the schema "
+        "or aggregates are sensitive."
+    )
     return "\n".join(lines)
 
 
