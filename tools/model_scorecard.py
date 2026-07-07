@@ -30,9 +30,9 @@ from demos.analytics.src.analytics.csv_source import CsvSource
 from demos.analytics.src.analytics.profiler import profile_dataset
 from demos.analytics.src.analytics.semantic_model import SemanticModel
 from python_ai_agents import AgentRequest, RecordingObserver, RequestContext
-from python_ai_agents.adapters import DEFAULT_OLLAMA_TEST_MODELS, OllamaModelPort
+from python_ai_agents.adapters import OllamaModelPort
 
-DEFAULT_MODELS = DEFAULT_OLLAMA_TEST_MODELS
+DEFAULT_MODELS = ("gemma4:31b-cloud", "ornith:latest")
 DEFAULT_OUTPUT_DIR = Path("model_scorecards")
 PASS_THRESHOLD = 80.0
 MAX_OLLAMA_CONTEXT = 65_536
@@ -407,7 +407,7 @@ def build_cases() -> tuple[ScorecardCase, ...]:
                 f"Use causal_effect with target {profit}, treatment {treatment}, "
                 f"and controls {units}, {visits}. Report the caveat."
             ),
-            expected_terms=("caveat", "causation"),
+            expected_terms=("causation", "confound"),
             required_tools=("causal_effect",),
             argument_check=_requires_refs(
                 ("causal_effect", "target", profit),

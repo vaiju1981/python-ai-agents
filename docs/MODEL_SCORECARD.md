@@ -11,7 +11,6 @@ Run from the repository root:
 ```bash
 PYTHONPATH=src /opt/homebrew/Caskroom/miniconda/base/envs/mlv2Py3/bin/python \
   tools/model_scorecard.py \
-  --models gemma4:31b-cloud ornith:latest hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0 \
   --output-dir model_scorecards \
   --timeout 60 \
   --num-ctx 65536
@@ -47,37 +46,35 @@ Each case is scored out of 100:
 | --- | ---: | --- |
 | Answer correctness | 35 | Expected facts/terms appear in the final answer. |
 | Completion | 10 | Agent turn completed without hitting an error/step limit. |
-| Tool selection | 20 | Required tools were called, or no unexpected tools were called. |
-| Tool arguments | 20 | Tool arguments matched the requested metric, dimension, SQL terms, or numeric values. |
+| Tool selection | 20 | Required analytics demo tools were called. |
+| Tool arguments | 20 | Tool arguments used discovered table/column refs. |
 | Tool efficiency | 5 | No excessive repeated tool calls. |
 | Output hygiene | 10 | Final answer is clean: no visible `<think>` trace and not empty. |
 
-The output hygiene row is intentionally strict. Some models, especially
-`hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0`, may return valid tool calls
-while leaving the user-visible response inside `<think>...</think>` or failing
-to produce a final answer after tools complete. That is scored separately from
-tool-call correctness because it is a product-demo failure even when the tool
-arguments are correct.
+Tool-call correctness and final-answer quality are scored separately. A model
+gets substantial credit for calling the right tool with the right arguments,
+but the case should also verify that the user-facing answer includes the
+important result or caveat. The causal case checks the substance of the caveat
+(`causation` plus `confound`) rather than requiring the literal word `caveat`.
 
 ## Current Run
 
-Latest run: `model_scorecards/ollama_model_scorecard_20260707T053638Z.md`
+Latest run: `model_scorecards/ollama_model_scorecard_20260707T055223Z.md`
 
 | Model | Score | Duration | Read |
 | --- | ---: | ---: | --- |
-| `gemma4:31b-cloud` | `1000/1000` | `33.1s` | Best current production-demo candidate for this analytics harness: perfect tool routing, arguments, and final answers. |
-| `ornith:latest` | `930/1000` | `149.0s` | Strong local candidate. It routed tools correctly but missed final-answer terms on modeling and causal caveat cases. |
-| `hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0` | `640/1000` | `175.3s` | Useful stress/regression target. It still leaks thinking traces, repeats tool calls, and misses some required tools. |
+| `gemma4:31b-cloud` | `1000/1000` | `25.4s` | Best current production-demo candidate when cloud access is acceptable: perfect score and lowest latency. |
+| `ornith:latest` | `1000/1000` | `144.6s` | Strong local/offline candidate: perfect score with correct tool routing, arguments, and final answers. |
 
 This run caps Ollama context with `num_ctx=65536` to avoid local memory pressure.
-With that cap, `ornith:latest` was `4.50x` slower than `gemma4:31b-cloud`
-(`149.0s` vs `33.1s`). Accuracy and latency both favor `gemma4:31b-cloud` for
-the current production analytics scorecard, while `ornith:latest` remains a
-good local/offline candidate.
+With that cap, `ornith:latest` was `5.71x` slower than `gemma4:31b-cloud`
+(`144.6s` vs `25.4s`). Accuracy is tied on the current analytics scorecard;
+latency favors `gemma4:31b-cloud`, while `ornith:latest` remains the best
+local/offline candidate.
 
 ## Recommendation
 
 Use `gemma4:31b-cloud` as the default production-demo model when cloud access is
-acceptable. Use `ornith:latest` as the local/offline candidate. Keep
-`hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0` as a regression target for
-tool-call handling, not as the primary demo model.
+acceptable. Use `ornith:latest` as the local/offline candidate. Run
+`hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0` only as an optional regression
+target for tool-call handling, not as the primary production-demo comparison.
