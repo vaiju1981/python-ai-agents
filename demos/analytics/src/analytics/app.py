@@ -31,6 +31,7 @@ from demos.analytics.src.analytics.agent import create_agent  # noqa: E402
 from demos.analytics.src.analytics.charts import ChartSpec, choose_chart  # noqa: E402
 from demos.analytics.src.analytics.csv_source import CsvSource  # noqa: E402
 from demos.analytics.src.analytics.insights import generate_insights  # noqa: E402
+from demos.analytics.src.analytics.model_store import FileModelStore  # noqa: E402
 from demos.analytics.src.analytics.models import from_env as model_from_env  # noqa: E402
 from demos.analytics.src.analytics.profiler import profile_dataset  # noqa: E402
 from demos.analytics.src.analytics.schema_builder import refine_profile_with_llm  # noqa: E402
@@ -141,8 +142,14 @@ def _ensure_agent(provider: str, model_name: str) -> None:
         return
     capture = _RowCapture()
     st.session_state.capture = capture
+    store = FileModelStore(Path(st.session_state.tmp_dir) / "models")
     st.session_state.agent = create_agent(
-        st.session_state.source, model_from_env(), st.session_state.semantic, observers=[capture]
+        st.session_state.source,
+        model_from_env(),
+        st.session_state.semantic,
+        observers=[capture],
+        model_store=store,
+        dataset_sig=str(st.session_state.data_sig),
     )
     st.session_state.model_sig = model_sig
 

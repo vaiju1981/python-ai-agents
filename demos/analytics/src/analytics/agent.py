@@ -24,6 +24,8 @@ def create_agent(
     semantic: SemanticModel | None = None,
     catalog: Any = None,
     observers: list[AgentObserver] | None = None,
+    model_store: Any = None,
+    dataset_sig: str = "",
 ) -> Agent:
     """Create a schema-driven analytics agent with governed read-only tools."""
     if semantic is None:
@@ -31,7 +33,7 @@ def create_agent(
         semantic = SemanticModel.from_profile(profile)
 
     tools = AnalyticsToolset(source, semantic, catalog)
-    models = ModelsToolset(source, semantic)
+    models = ModelsToolset(source, semantic, store=model_store, dataset_sig=dataset_sig)
     system_prompt = (
         "You are a careful data analyst over this dataset. Use these EXACT refs.\n"
         f"SCHEMA: {tools.catalog_json()}\n"

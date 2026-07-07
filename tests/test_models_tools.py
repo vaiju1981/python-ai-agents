@@ -18,6 +18,7 @@ pytest.importorskip("statsmodels")
 np = pytest.importorskip("numpy")
 
 from demos.analytics.src.analytics.csv_source import CsvSource
+from demos.analytics.src.analytics.model_store import InMemoryModelStore
 from demos.analytics.src.analytics.models_tools import ModelsToolset
 from demos.analytics.src.analytics.profiler import profile_dataset
 from demos.analytics.src.analytics.semantic_model import SemanticModel
@@ -103,3 +104,26 @@ def test_all_tools_are_read_only(toolset):
 
     for tool in toolset.all_tools():
         assert tool.spec.effect == ToolEffect.READ_ONLY
+
+
+def test_build_model_caches_then_retrains_on_request(tmp_path):
+    csv = tmp_path / "s.csv"
+    lines = ["spend,revenue"]
+    rng = np.random.default_rng(1)
+    for i in range(40):
+        spend = 100 + i * 2 + rng.normal(0, 3)
+        lines.append(f"{round(spend, 2)},{round(2 * spend + rng.normal(0, 5), 2)}")
+    csv.write_text("\n".join(lines) + "\n")
+
+    src = CsvSource(named_csvs={"s": csv})
+    semantic = SemanticModel.from_profile(profile_dataset(src))
+    tools = ModelsToolset(src, semantic, store=InMemoryModelStore(), dataset_sig="sig-1")
+
+    first = _call(tools.build_model(), {"target": "revenue"})
+    second = _call(tools.build_model(), {"target": "revenue"})
+    forced = _call(tools.build_model(), {"target": "revenue", "retrain": True})
+    src.close()
+
+    assert first["cached"] is False  # trained
+    assert second["cached"] is True  # served from the store, not retrained
+    assert forced["cached"] is False  # explicit retrain bypasses the cache

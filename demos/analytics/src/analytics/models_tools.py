@@ -15,9 +15,11 @@ user text, so the interpolation here is safe.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from demos.analytics.src.analytics.data_source import DataSource, sql_qcol, sql_quote
+from demos.analytics.src.analytics.model_store import ModelRecord, ModelStore, model_key
 from demos.analytics.src.analytics.semantic_model import SemanticModel
 from demos.analytics.src.analytics.toolset import (
     MAX_RESULT_CHARS,
@@ -34,9 +36,20 @@ _MIN_ROWS = 20
 class ModelsToolset:
     """Predictive/causal tools over a ``DataSource`` + ``SemanticModel``."""
 
-    def __init__(self, source: DataSource, model: SemanticModel) -> None:
+    def __init__(
+        self,
+        source: DataSource,
+        model: SemanticModel,
+        *,
+        store: ModelStore | None = None,
+        dataset_sig: str = "",
+        model_ttl: float | None = None,
+    ) -> None:
         self.source = source
         self.model = model
+        self.store = store
+        self.dataset_sig = dataset_sig
+        self.model_ttl = model_ttl
 
     # -- tool registry --------------------------------------------------------
 
@@ -75,8 +88,32 @@ class ModelsToolset:
             is_clf = task == "classification" or (
                 task == "auto" and self._looks_categorical(data[t_col])
             )
-            result = self._fit(data[t_col], data[list(X.columns)], list(X.columns), is_clf)
-            return _ok("build_model", result)
+            feature_cols = list(X.columns)
+            algo = "random_forest_classifier" if is_clf else "random_forest_regressor"
+            key = model_key(
+                dataset_sig=self.dataset_sig,
+                task="classification" if is_clf else "regression",
+                target=t_col,
+                predictors=feature_cols,
+                algorithm=algo,
+            )
+
+            # Train-once cache: reuse a fresh model unless the caller forces a retrain.
+            if self.store is not None and not args.get("retrain", False):
+                cached = self.store.get(key, max_age=self.model_ttl)
+                if cached is not None:
+                    return _ok(
+                        "build_model",
+                        {**cached.metadata, "cached": True, "trained_at": cached.trained_at},
+                    )
+
+            result, fitted = self._fit(data[t_col], data[feature_cols], feature_cols, is_clf)
+            trained_at = time.time()
+            if self.store is not None:
+                self.store.put(
+                    ModelRecord(key=key, model=fitted, metadata=result, trained_at=trained_at)
+                )
+            return _ok("build_model", {**result, "cached": False, "trained_at": trained_at})
 
         return _make_tool(
             "build_model",
@@ -92,12 +129,13 @@ class ModelsToolset:
                         "enum": ["auto", "classification", "regression"],
                         "default": "auto",
                     },
+                    "retrain": {"type": "boolean", "default": False},
                 },
                 required=("target",),
             ),
         )
 
-    def _fit(self, y: Any, x: Any, pcols: list[str], is_clf: bool) -> dict[str, Any]:
+    def _fit(self, y: Any, x: Any, pcols: list[str], is_clf: bool) -> tuple[dict[str, Any], Any]:
         xv = x.astype(float).values
         if is_clf:
             from sklearn.ensemble import RandomForestClassifier
@@ -114,7 +152,7 @@ class ModelsToolset:
                 "cv_accuracy": score,
                 "feature_importance": _importances(pcols, model.feature_importances_),
                 "method": "RandomForestClassifier, 5-fold CV accuracy on historical data",
-            }
+            }, model
         from sklearn.ensemble import RandomForestRegressor
 
         yv = y.astype(float).values
@@ -127,7 +165,7 @@ class ModelsToolset:
             "cv_r2": score,
             "feature_importance": _importances(pcols, model.feature_importances_),
             "method": "RandomForestRegressor, 5-fold CV R^2 on historical data",
-        }
+        }, model
 
     # -- forecast -------------------------------------------------------------
 
