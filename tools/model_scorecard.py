@@ -117,7 +117,7 @@ def main() -> None:
     )
     parser.add_argument("--models", nargs="*", default=list(DEFAULT_MODELS))
     parser.add_argument("--base-url", default="http://127.0.0.1:11434")
-    parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--timeout", type=float, default=180.0)  # cloud models need > 60s per call
     parser.add_argument("--num-ctx", type=int, default=MAX_OLLAMA_CONTEXT)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--max-steps", type=int, default=8)
