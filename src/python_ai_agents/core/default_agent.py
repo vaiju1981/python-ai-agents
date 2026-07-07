@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
@@ -15,7 +16,7 @@ from python_ai_agents.core.memory import (
     InMemoryMemory,
     Memory,
 )
-from python_ai_agents.core.model import Message, ModelPort, ModelRequest, ModelResponse, Role
+from python_ai_agents.core.model import Message, ModelPort, ModelRequest, Role
 from python_ai_agents.core.observe import AgentObserver
 from python_ai_agents.core.tool import (
     AllTools,
@@ -27,7 +28,6 @@ from python_ai_agents.core.tool import (
     ToolResult,
     ToolSelector,
 )
-
 
 MAX_STEPS_MESSAGE = "I couldn't finish that within my step budget. Please try rephrasing."
 MODEL_ERROR_MESSAGE = "I ran into a problem reaching the model. Please try again."
@@ -52,6 +52,12 @@ class DefaultAgent:
     max_tool_result_chars: int = 8_000
     frame_tool_results: bool = True
 
+    def __post_init__(self) -> None:
+        # Build the default store once, at construction, so concurrent run() calls
+        # on a shared agent don't each race to create (and split across) their own.
+        if self.remember_conversation and self.conversation_store is None:
+            self.conversation_store = InMemoryConversationStore()
+
     async def run(self, request: AgentRequest) -> AgentResponse:
         turn_start = perf_counter()
         await self._notify("on_turn_start", request.input)
@@ -61,9 +67,7 @@ class DefaultAgent:
             await self._notify("on_turn_end", response, _duration_since(turn_start))
             return response
 
-        if self.conversation_store is None:
-            self.conversation_store = InMemoryConversationStore()
-
+        assert self.conversation_store is not None  # built in __post_init__
         async with self.conversation_store.memory(
             request.context.tenant,
             request.context.session_id,
@@ -108,6 +112,11 @@ class DefaultAgent:
             if response.has_tool_calls:
                 memory.add(Message.assistant(response.text, response.tool_calls))
                 for call in response.tool_calls:
+                    if _deadline_exceeded(request):
+                        return AgentResponse.stopped(
+                            "I ran out of time on this request.",
+                            "deadline_exceeded",
+                        )
                     await self._notify("on_tool_call", call)
                     result = await self._invoke_tool(
                         call.name,
@@ -224,9 +233,17 @@ async def _invoke_with_timeout(
     if timeout_seconds is None or timeout_seconds <= 0:
         return await tool.invoke(arguments, request.context)
 
+    # Run the tool in a worker thread so a blocking/CPU-bound tool can't pin the
+    # event loop and IS abandoned when the timeout fires. Python cannot interrupt
+    # the thread, so an abandoned tool finishes in the background — this bounds the
+    # turn's latency, not the thread. Truly-async tools still work correctly.
+    # ponytail: thread-per-timed-call; fine at tool-call rates, revisit if it's hot.
     result: ToolResult | None = None
     with anyio.move_on_after(timeout_seconds) as scope:
-        result = await tool.invoke(arguments, request.context)
+        result = await anyio.to_thread.run_sync(
+            functools.partial(anyio.run, tool.invoke, arguments, request.context),
+            abandon_on_cancel=True,
+        )
     if scope.cancel_called:
         return None
     return result

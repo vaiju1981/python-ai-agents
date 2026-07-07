@@ -64,6 +64,16 @@ class SlowTool(EchoTool):
         return ToolResult.ok("late")
 
 
+class BlockingTool(EchoTool):
+    """A blocking/CPU tool: sleeps synchronously, with no await point to cancel at."""
+
+    async def invoke(self, arguments, context):
+        import time
+
+        time.sleep(0.5)  # cannot be cancelled cooperatively
+        return ToolResult.ok("late")
+
+
 def test_default_agent_returns_model_text() -> None:
     async def run() -> None:
         model = ScriptedModel([ModelResponse.text_response("hello")])
@@ -260,6 +270,38 @@ def test_default_agent_times_out_tool_call() -> None:
     anyio.run(run)
 
 
+def test_default_agent_times_out_blocking_sync_tool() -> None:
+    # Regression: a blocking (non-async) tool body must still honor the timeout.
+    async def run() -> None:
+        import time
+
+        model = ScriptedModel(
+            [
+                ModelResponse.tool_response(
+                    (ToolCall(name="echo", arguments={"message": "slow"}, id="call-1"),)
+                ),
+                ModelResponse.text_response("handled"),
+            ]
+        )
+        audit = InMemoryAuditSink()
+        agent = DefaultAgent(
+            model,
+            tools=[BlockingTool()],
+            audit_sink=audit,
+            tool_timeout_seconds=0.02,
+        )
+
+        started = time.perf_counter()
+        await agent.run(AgentRequest.ephemeral("ping"))
+        elapsed = time.perf_counter() - started
+
+        assert "timed out" in model.requests[1].messages[-1].content
+        assert [event.event_type for event in audit.events()] == ["tool.start", "tool.timeout"]
+        assert elapsed < 0.4  # bounded well under the tool's 0.5s block
+
+    anyio.run(run)
+
+
 def test_default_agent_caps_tool_result_before_model_context() -> None:
     async def run() -> None:
         model = ScriptedModel(
@@ -270,7 +312,9 @@ def test_default_agent_caps_tool_result_before_model_context() -> None:
                 ModelResponse.text_response("handled"),
             ]
         )
-        agent = DefaultAgent(model, tools=[EchoTool()], max_tool_result_chars=3, frame_tool_results=False)
+        agent = DefaultAgent(
+            model, tools=[EchoTool()], max_tool_result_chars=3, frame_tool_results=False
+        )
 
         await agent.run(AgentRequest.ephemeral("ping"))
 

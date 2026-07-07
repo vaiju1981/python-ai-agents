@@ -67,6 +67,25 @@ def test_streaming_adapter_accumulates_tool_calls() -> None:
     anyio.run(run)
 
 
+def test_streaming_adapter_assembles_fragmented_tool_call() -> None:
+    # A provider streams one call across chunks (same id, argument fragments).
+    async def run() -> None:
+        model = ScriptedStreamingModel([
+            ModelChunk(tool_calls=(ToolCall(name="search", arguments={"q": "hi"}, id="c1"),)),
+            ModelChunk(tool_calls=(ToolCall(name="", arguments={"limit": 5}, id="c1"),)),
+            ModelChunk(done=True),
+        ])
+        adapter = StreamingModelAdapter(model)
+
+        response = await adapter.chat(ModelRequest(messages=()))
+
+        assert len(response.tool_calls) == 1  # assembled, not two fragments
+        assert response.tool_calls[0].name == "search"
+        assert response.tool_calls[0].arguments == {"q": "hi", "limit": 5}
+
+    anyio.run(run)
+
+
 def test_streaming_adapter_captures_usage() -> None:
     async def run() -> None:
         model = ScriptedStreamingModel([

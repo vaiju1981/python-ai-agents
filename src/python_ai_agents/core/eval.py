@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol
 
+import anyio
+
 from python_ai_agents.core.agent import Agent, AgentRequest, AgentResponse
 from python_ai_agents.core.context import RequestContext
 
@@ -101,7 +103,9 @@ class EvalRunner:
         for case in cases:
             ctx = context or RequestContext.ephemeral()
             response = await self.agent.run(AgentRequest(input=case.input, context=ctx))
-            passed, detail = self.scorer.score(case, response)
+            # Offload scoring: a real scorer (e.g. DeepEval LLM-as-judge) does blocking
+            # I/O and would otherwise stall the event loop.
+            passed, detail = await anyio.to_thread.run_sync(self.scorer.score, case, response)
             results.append(
                 EvalResult(
                     case=case,

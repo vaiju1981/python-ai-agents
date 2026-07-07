@@ -15,17 +15,19 @@ Usage::
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
 from python_ai_agents.core.agent import AgentResponse
-from python_ai_agents.core.model import ModelRequest, ModelResponse, Usage
+from python_ai_agents.core.model import Usage
 from python_ai_agents.core.observe import NoopAgentObserver
-from python_ai_agents.core.model import ToolCall
-from python_ai_agents.core.tool import ToolResult
 
 __all__ = ["OtelAgentObserver"]
+
+# Per-async-task current span, so concurrent turns don't clobber each other.
+_current_span: ContextVar[Any] = ContextVar("paa_otel_current_span", default=None)
 
 
 @dataclass(slots=True)
@@ -39,12 +41,11 @@ class OtelAgentObserver(NoopAgentObserver):
     service_name: str = "python-ai-agents"
     _tracer: Any = field(default=None, init=False)
     _meter: Any = field(default=None, init=False)
-    _current_span: Any = field(default=None, init=False)
     _token_counter: Any = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         try:
-            from opentelemetry import trace, metrics
+            from opentelemetry import metrics, trace
 
             self._tracer = trace.get_tracer(self.service_name)
             self._meter = metrics.get_meter(self.service_name)
@@ -57,15 +58,16 @@ class OtelAgentObserver(NoopAgentObserver):
     async def on_turn_start(self, input_text: str) -> None:
         if self._tracer is None:
             return
-        self._current_span = self._tracer.start_span("agent.turn")
+        _current_span.set(self._tracer.start_span("agent.turn"))
 
     async def on_turn_end(self, response: AgentResponse, duration: timedelta) -> None:
-        if self._current_span is not None:
-            self._current_span.set_attribute("agent.stop_reason", response.stop_reason)
-            self._current_span.set_attribute("agent.blocked", response.blocked)
-            self._current_span.set_attribute("agent.duration_ms", duration.total_seconds() * 1000)
-            self._current_span.end()
-            self._current_span = None
+        span = _current_span.get()
+        if span is not None:
+            span.set_attribute("agent.stop_reason", response.stop_reason)
+            span.set_attribute("agent.blocked", response.blocked)
+            span.set_attribute("agent.duration_ms", duration.total_seconds() * 1000)
+            span.end()
+            _current_span.set(None)
 
     async def on_usage(self, model: str, usage: Usage) -> None:
         if self._token_counter is not None:
@@ -75,6 +77,7 @@ class OtelAgentObserver(NoopAgentObserver):
             )
 
     async def on_error(self, stage: str, error: BaseException) -> None:
-        if self._current_span is not None:
-            self._current_span.record_exception(error)
-            self._current_span.set_attribute("agent.error_stage", stage)
+        span = _current_span.get()
+        if span is not None:
+            span.record_exception(error)
+            span.set_attribute("agent.error_stage", stage)
