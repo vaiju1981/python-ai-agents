@@ -681,7 +681,9 @@ def _ground_truth_redrock(source: CsvSource) -> dict[str, str]:
         "top_state": "nevada|nv" if str(top_state) == "NV" else str(top_state).lower(),
         "top_game_generation": f"{gen}|generation x" if "gen x" in gen else gen,
         "mt_drilldown_game": str(top_mfr2_game).lower(),
-        "igt_payback": f"{igt_pb:.1f}|{round(igt_pb)}",
+        # Include the 2-decimal form models actually print (93.69) — ".1f" alone (93.7) is
+        # NOT a substring of "93.69" and would wrongly fail a correct answer.
+        "igt_payback": f"{igt_pb:.2f}|{igt_pb:.1f}|{round(igt_pb)}",
     }
 
 
