@@ -49,6 +49,13 @@ same on every push/PR.
   per-rerun tempdir leak).
 - **NL→tool eval:** gated (`PAA_RUN_OLLAMA_TESTS`) test wiring the core
   `EvalRunner` over the analytics agent, as a regression guard on answer quality.
+- **Season-aware forecast:** Holt-Winters with an additive seasonal component
+  (auto-detected period), falling back to trend-only / linear.
+- **Model lifecycle (first cut):** `ModelStore` (InMemory/File) with train-once
+  caching keyed by dataset signature + task + target + predictors + algorithm;
+  retrain on data change, TTL, or explicit request. Full plan, incl. drift /
+  scheduled retrain / `predict` serving / MLflow adapter, in
+  [MODEL_LIFECYCLE.md](MODEL_LIFECYCLE.md).
 
 ## Deferred (by request)
 
