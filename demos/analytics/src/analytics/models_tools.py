@@ -31,6 +31,8 @@ from demos.analytics.src.analytics.toolset import (
 from python_ai_agents.core.tool import Tool, ToolResult
 
 _MIN_ROWS = 20
+# Cap the rows pulled into pandas/sklearn for training; larger tables are sampled.
+_MAX_TRAIN_ROWS = 100_000
 
 
 class ModelsToolset:
@@ -535,7 +537,12 @@ class ModelsToolset:
 
         select = ", ".join(sql_qcol(table, c) for c in columns)
         where = " AND ".join(f"{sql_qcol(table, c)} IS NOT NULL" for c in columns)
-        sql = f"SELECT {select} FROM {sql_quote(table)} WHERE {where}"
+        # Cap rows pulled into pandas so training stays in memory on large tables.
+        # USING SAMPLE returns everything when the table is smaller than the cap.
+        sql = (
+            f"SELECT * FROM (SELECT {select} FROM {sql_quote(table)} WHERE {where}) "
+            f"USING SAMPLE {_MAX_TRAIN_ROWS} ROWS"
+        )
         return pd.DataFrame(self.source.native_query(sql))
 
     @staticmethod

@@ -109,7 +109,8 @@ def _load_dataset(named_csvs: dict[str, Path], sig: tuple, tmp_dir: Path, *, ref
     if old_dir is not None:
         shutil.rmtree(old_dir, ignore_errors=True)
 
-    source = CsvSource(named_csvs=named_csvs)
+    # File-backed DuckDB so large tables spill to disk (out-of-core) instead of RAM.
+    source = CsvSource(db_path=str(tmp_dir / "data.duckdb"), named_csvs=named_csvs)
     profile = profile_dataset(source)
     if refine:
         try:
@@ -175,20 +176,41 @@ def main() -> None:
 
         st.divider()
         st.header("Data")
-        uploaded = st.file_uploader("Upload CSV files", type="csv", accept_multiple_files=True)
-        if uploaded:
-            # Signature from name+size so we only re-import (and only mkdtemp) when the
-            # upload actually changes — Streamlit reruns this block on every interaction.
-            sig = tuple(sorted((f.name, f.size) for f in uploaded))
-            if st.session_state.get("data_sig") != sig:
-                tmp_dir = Path(tempfile.mkdtemp())
-                named_csvs: dict[str, Path] = {}
-                for f in uploaded:
-                    path = tmp_dir / f.name
-                    path.write_bytes(f.getbuffer())
-                    named_csvs[Path(f.name).stem] = path
-                with st.spinner("Importing into DuckDB and profiling..."):
-                    _load_dataset(named_csvs, sig, tmp_dir, refine=refine)
+        mode = st.radio("Source", ["Upload CSV", "Local file path"], horizontal=True)
+
+        if mode == "Upload CSV":
+            uploaded = st.file_uploader("Upload CSV files", type="csv", accept_multiple_files=True)
+            if uploaded:
+                # name+size signature: only re-import when the upload actually changes.
+                sig = tuple(sorted((f.name, f.size) for f in uploaded))
+                if st.session_state.get("data_sig") != sig:
+                    tmp_dir = Path(tempfile.mkdtemp())
+                    named_csvs: dict[str, Path] = {}
+                    for f in uploaded:
+                        path = tmp_dir / f.name
+                        path.write_bytes(f.getbuffer())
+                        named_csvs[Path(f.name).stem] = path
+                    with st.spinner("Importing into DuckDB and profiling..."):
+                        _load_dataset(named_csvs, sig, tmp_dir, refine=refine)
+        else:
+            st.caption("Read CSVs on disk (no upload) — read in place; best for large files.")
+            paths_text = st.text_area(
+                "CSV path(s), one per line", height=100, placeholder="/data/sales.csv"
+            )
+            if st.button("Load", type="primary") and paths_text.strip():
+                paths = [Path(p.strip()).expanduser() for p in paths_text.splitlines() if p.strip()]
+                missing = [str(p) for p in paths if not p.is_file()]
+                if missing:
+                    st.error("Not found: " + ", ".join(missing))
+                else:
+                    sig = tuple(sorted((str(p), p.stat().st_size) for p in paths))
+                    if st.session_state.get("data_sig") != sig:
+                        tmp_dir = Path(tempfile.mkdtemp())
+                        named = {p.stem: p for p in paths}
+                        with st.spinner("Reading in place and profiling..."):
+                            _load_dataset(named, sig, tmp_dir, refine=refine)
+
+        if "semantic" in st.session_state:
             sm = st.session_state.semantic
             st.success(
                 f"{len(st.session_state.profile.tables)} table(s) · {len(sm.metrics)} metric(s) · "

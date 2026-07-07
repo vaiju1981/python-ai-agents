@@ -10,12 +10,15 @@ every chart and insight is derived from a governed read-only query.
 ```bash
 python -m pip install -r requirements-analytics-demo.txt
 ANALYTICS_MODEL_PROVIDER=ollama ANALYTICS_MODEL=ornith:latest \
-    streamlit run demos/analytics/src/analytics/app.py
+    streamlit run demos/analytics/src/analytics/app.py --server.maxUploadSize=4096
 ```
 
 ## What it does
 
-- **Upload CSVs** — imported into DuckDB with external file access locked down.
+- **Two ways to load data** — *Upload CSV* (small files, through the browser), or
+  *Local file path* for **large/production files**: DuckDB reads them **in place**
+  (no upload) into a **file-backed database**, so a multi-GB CSV stays out-of-core
+  (on disk, not RAM). Import locks external file access down afterward.
 - **Understands the data, fast** — deterministic profiling and semantic-model
   inference (metrics, dimensions, time columns, keys) plus cross-file
   relationship discovery. No LLM on the load path, so it's quick.
