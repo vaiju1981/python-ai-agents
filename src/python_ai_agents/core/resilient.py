@@ -9,9 +9,9 @@
 from __future__ import annotations
 
 import random
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import timedelta
 
 import anyio
 
@@ -95,8 +95,8 @@ class ReplayModelPort:
 class ObservingModelPort:
     """Decorates a ``ModelPort`` so each call emits observer events.
 
-    Useful for model calls outside ``DefaultAgent`` (e.g. a ``DeepAgent``'s
-    planner or synthesizer). Observer failures are isolated.
+    Useful for model calls outside ``DefaultAgent`` (e.g. a planner or
+    summarizer). Observer failures are isolated.
     """
 
     delegate: ModelPort
@@ -116,7 +116,5 @@ class ObservingModelPort:
                 pass
         return response
 
-
-from datetime import timedelta
 
 _zero_duration = timedelta(0)
