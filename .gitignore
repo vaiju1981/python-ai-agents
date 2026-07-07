@@ -14,3 +14,11 @@ uv.lock
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Editor / IDE / OS
+.claude/
+.DS_Store
+
+# Generated data + benchmark artifacts
+model_scorecards/
+*.duckdb
