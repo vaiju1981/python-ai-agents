@@ -32,14 +32,10 @@ opentelemetry = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
 llamaindex = ["llama-index>=0.10"]
 analytics-demo = [
   "duckdb>=1.1",
-  "polars>=1.0",
   "pandas>=2.0",
   "plotly>=5.0",
   "streamlit>=1.35",
-  "fastapi>=0.115",
-  "uvicorn>=0.30",
   "scikit-learn>=1.4",
-  "statsmodels>=0.14",
 ]
 dev = [
   "jsonschema>=4.20",

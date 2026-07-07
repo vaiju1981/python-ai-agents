@@ -256,8 +256,10 @@ def test_create_agent_wires_unique_tool_names(source):
     names = [tool.spec.name for tool in agent.tools]
     assert len(names) == len(set(names))
     assert "run_query" in names
-    assert "cohort_analysis" in names
-    assert "ml_regression" in names
+    assert "run_sql" in names
+    # sprawl removed: no ML/advanced tools are wired into the agent
+    assert "cohort_analysis" not in names
+    assert "ml_regression" not in names
 
 
 def test_multi_fact_planning_fails_instead_of_cross_joining():
