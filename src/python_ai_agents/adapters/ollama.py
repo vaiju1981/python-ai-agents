@@ -13,6 +13,7 @@ from python_ai_agents.core import AgentRequest, AgentResponse
 from python_ai_agents.core.model import Message, ModelRequest, ModelResponse, Role, ToolCall, Usage
 
 DEFAULT_OLLAMA_TEST_MODELS = (
+    "gemma4:31b-cloud",
     "hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0",
     "ornith:latest",
 )

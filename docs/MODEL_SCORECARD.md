@@ -55,19 +55,19 @@ arguments are correct.
 
 ## Current Run
 
-Latest run: `model_scorecards/ollama_model_scorecard_20260706T232238Z.md`
+Latest run: `model_scorecards/ollama_model_scorecard_20260707T045650Z.md`
 
 | Model | Score | Duration | Read |
 | --- | ---: | ---: | --- |
-| `ornith:latest` | `800/800` | `66.9s` | Best production-demo candidate. Perfect across simple, memory, tool, multi-tool, analytics, and SQL-style cases. |
-| `gemma4:31b-cloud` | `765/800` | `21.1s` | Strong fast fallback. Excellent tool arguments and clean output, but missed one numeric detail after a complex SQL-style tool. |
-| `hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0` | `510/800` | `41.7s` | Useful for tool-call stress testing. It often called tools correctly, but leaked `<think>` traces and failed to synthesize final answers after tools. |
+| `ornith:latest` | `800/800` | `88.5s` | Best production-demo candidate. Perfect across simple, memory, tool, multi-tool, analytics, and SQL-style cases. |
+| `gemma4:31b-cloud` | `765/800` | `8.9s` | Strong fast fallback. Excellent tool arguments and clean output, but missed one numeric detail after a complex SQL-style tool. |
+| `hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0` | `510/800` | `46.5s` | Useful for tool-call stress testing. It often called tools correctly, but leaked `<think>` traces and failed to synthesize final answers after tools. |
 
-In the latest run, `ornith:latest` was `3.18x` slower than
-`gemma4:31b-cloud` (`66.9s` vs `21.1s`). The previous captured run showed a
-wider spread (`94.1s` vs `10.3s`, about `9.1x`), so treat latency as workload
-and service-state dependent. Accuracy still favors `ornith:latest` for the
-flagship demo.
+In the latest run, `ornith:latest` was `9.98x` slower than
+`gemma4:31b-cloud` (`88.5s` vs `8.9s`). The previous captured run showed a
+narrower spread (`66.9s` vs `21.1s`, about `3.18x`), so treat latency as
+workload and service-state dependent. Accuracy still favors `ornith:latest`
+for the flagship demo.
 
 ## Recommendation
 
