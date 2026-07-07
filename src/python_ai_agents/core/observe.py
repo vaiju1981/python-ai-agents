@@ -10,29 +10,23 @@ from python_ai_agents.core.tool import ToolResult
 
 
 class AgentObserver(Protocol):
-    async def on_turn_start(self, input_text: str) -> None:
-        ...
+    async def on_turn_start(self, input_text: str) -> None: ...
 
-    async def on_model_call(self, request: ModelRequest) -> None:
-        ...
+    async def on_model_call(self, request: ModelRequest) -> None: ...
 
-    async def on_model_response(self, response: ModelResponse, latency: timedelta) -> None:
-        ...
+    async def on_model_response(self, response: ModelResponse, latency: timedelta) -> None: ...
 
-    async def on_usage(self, model: str, usage: Usage) -> None:
-        ...
+    async def on_usage(self, model: str, usage: Usage) -> None: ...
 
-    async def on_tool_call(self, call: ToolCall) -> None:
-        ...
+    async def on_tool_call(self, call: ToolCall) -> None: ...
 
-    async def on_tool_result(self, tool_name: str, result: ToolResult, latency: timedelta) -> None:
-        ...
+    async def on_tool_result(
+        self, tool_name: str, result: ToolResult, latency: timedelta
+    ) -> None: ...
 
-    async def on_turn_end(self, response: AgentResponse, duration: timedelta) -> None:
-        ...
+    async def on_turn_end(self, response: AgentResponse, duration: timedelta) -> None: ...
 
-    async def on_error(self, stage: str, error: BaseException) -> None:
-        ...
+    async def on_error(self, stage: str, error: BaseException) -> None: ...
 
 
 class NoopAgentObserver:
@@ -132,13 +126,17 @@ class RedactingObserver(NoopAgentObserver):
     async def on_tool_result(self, tool_name: str, result: ToolResult, latency: timedelta) -> None:
         await self.delegate.on_tool_result(
             tool_name,
-            ToolResult(self.replacement, result.error),
+            ToolResult(content=self.replacement, error=result.error),
             latency,
         )
 
     async def on_turn_end(self, response: AgentResponse, duration: timedelta) -> None:
         await self.delegate.on_turn_end(
-            AgentResponse(self.replacement, response.blocked, response.stop_reason),
+            AgentResponse(
+                output=self.replacement,
+                blocked=response.blocked,
+                stop_reason=response.stop_reason,
+            ),
             duration,
         )
 

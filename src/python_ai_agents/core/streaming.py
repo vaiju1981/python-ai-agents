@@ -37,8 +37,7 @@ class StreamingModelPort(Protocol):
     Implementations should be async generators (``async def`` with ``yield``).
     """
 
-    def stream_chat(self, request: ModelRequest) -> AsyncIterator[ModelChunk]:
-        ...
+    def stream_chat(self, request: ModelRequest) -> AsyncIterator[ModelChunk]: ...
 
 
 @dataclass(slots=True)

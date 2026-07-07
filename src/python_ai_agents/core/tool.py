@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
 from python_ai_agents.core.context import RequestContext
@@ -40,16 +41,13 @@ class ToolResult:
 
 class Tool(Protocol):
     @property
-    def spec(self) -> ToolSpec:
-        ...
+    def spec(self) -> ToolSpec: ...
 
-    async def invoke(self, arguments: dict[str, Any], context: RequestContext) -> ToolResult:
-        ...
+    async def invoke(self, arguments: dict[str, Any], context: RequestContext) -> ToolResult: ...
 
 
 class ToolSelector(Protocol):
-    def select(self, input_text: str, tools: list[Tool], context: RequestContext) -> list[Tool]:
-        ...
+    def select(self, input_text: str, tools: list[Tool], context: RequestContext) -> list[Tool]: ...
 
 
 class AllTools:
@@ -85,8 +83,7 @@ class ToolApprover(Protocol):
         spec: ToolSpec,
         arguments: dict[str, Any],
         context: RequestContext,
-    ) -> ToolDecision:
-        ...
+    ) -> ToolDecision: ...
 
 
 class ToolArgumentValidator(Protocol):
@@ -95,8 +92,7 @@ class ToolArgumentValidator(Protocol):
         spec: ToolSpec,
         arguments: dict[str, Any],
         context: RequestContext,
-    ) -> ToolDecision:
-        ...
+    ) -> ToolDecision: ...
 
 
 class NoopToolArgumentValidator:
@@ -169,8 +165,7 @@ class ApprovalHandler(Protocol):
     continues.
     """
 
-    async def request_approval(self, request: ApprovalRequest) -> bool:
-        ...
+    async def request_approval(self, request: ApprovalRequest) -> bool: ...
 
 
 @dataclass(slots=True)

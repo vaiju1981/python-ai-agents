@@ -8,7 +8,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import anyio
 
@@ -16,11 +16,9 @@ from python_ai_agents.core.model import Message, Role, ToolCall
 
 
 class Memory(Protocol):
-    def add(self, message: Message) -> None:
-        ...
+    def add(self, message: Message) -> None: ...
 
-    def history(self) -> tuple[Message, ...]:
-        ...
+    def history(self) -> tuple[Message, ...]: ...
 
 
 class InMemoryMemory:
@@ -55,8 +53,7 @@ class WindowedMemory:
 
 
 class ConversationStore(Protocol):
-    def memory(self, tenant: str, session_id: str) -> AbstractAsyncContextManager[Memory]:
-        ...
+    def memory(self, tenant: str, session_id: str) -> AbstractAsyncContextManager[Memory]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,14 +64,11 @@ class SessionSummary:
 
 
 class ConversationHistory(Protocol):
-    def list_sessions(self, tenant: str) -> list[SessionSummary]:
-        ...
+    def list_sessions(self, tenant: str) -> list[SessionSummary]: ...
 
-    def messages(self, tenant: str, session_id: str) -> tuple[Message, ...]:
-        ...
+    def messages(self, tenant: str, session_id: str) -> tuple[Message, ...]: ...
 
-    def delete(self, tenant: str, session_id: str) -> None:
-        ...
+    def delete(self, tenant: str, session_id: str) -> None: ...
 
 
 @dataclass(slots=True)
@@ -329,7 +323,7 @@ def _tool_call_from_json(value: object) -> ToolCall:
     return ToolCall(name=name, arguments=arguments, id=call_id if isinstance(call_id, str) else "")
 
 
-def _message_from_row(row) -> Message:
+def _message_from_row(row: Any) -> Message:
     role = Role(row[0])
     content = row[1]
     tool_calls_payload = json.loads(row[2])

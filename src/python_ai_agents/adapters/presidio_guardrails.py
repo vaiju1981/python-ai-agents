@@ -62,7 +62,7 @@ class PresidioScrubGuardrail:
         if self.anonymizer is None:
             from presidio_anonymizer import AnonymizerEngine
 
-            self.anonymizer = AnonymizerEngine()
+            self.anonymizer = AnonymizerEngine()  # type: ignore[no-untyped-call]
 
     async def check(
         self,

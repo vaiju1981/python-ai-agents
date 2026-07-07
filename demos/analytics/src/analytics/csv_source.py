@@ -14,7 +14,6 @@ from typing import Any
 import duckdb
 
 from demos.analytics.src.analytics.data_source import (
-    ColumnRole,
     ColumnSchema,
     DataSource,
     Relationship,
@@ -58,18 +57,13 @@ class CsvSource(DataSource):
         result = []
         for name in self._table_names:
             cols = self._table_columns(name)
-            row_count = self._conn.execute(
-                f"SELECT COUNT(*) FROM {sql_quote(name)}"
-            ).fetchone()[0]
+            row_count = self._conn.execute(f"SELECT COUNT(*) FROM {sql_quote(name)}").fetchone()[0]
             result.append(TableSchema(name=name, rows=row_count, columns=tuple(cols)))
         return result
 
     def _table_columns(self, table: str) -> list[ColumnSchema]:
         schema = self._conn.execute(f"DESCRIBE {sql_quote(table)}").fetchall()
-        return [
-            ColumnSchema(name=row[0], physical_type=row[1])
-            for row in schema
-        ]
+        return [ColumnSchema(name=row[0], physical_type=row[1]) for row in schema]
 
     def relationships(self) -> list[Relationship]:
         return []  # Discovered by RelationshipDiscovery, not the source
@@ -102,6 +96,7 @@ class CsvSource(DataSource):
 def _sanitize_identifier(name: str) -> str:
     """Restrict table names to safe identifier characters."""
     import re
+
     sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", name)
     if sanitized and sanitized[0].isdigit():
         sanitized = "t_" + sanitized

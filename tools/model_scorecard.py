@@ -36,7 +36,6 @@ from python_ai_agents import (
 from python_ai_agents.adapters import DEFAULT_OLLAMA_TEST_MODELS, OllamaModelPort
 from python_ai_agents.core.tool import Tool
 
-
 DEFAULT_MODELS = DEFAULT_OLLAMA_TEST_MODELS
 DEFAULT_OUTPUT_DIR = Path("model_scorecards")
 PASS_THRESHOLD = 80.0
@@ -187,10 +186,7 @@ async def run_scorecard(
                     )
                 )
                 continue
-            case_results = [
-                await run_case(model_name, model, case, max_steps)
-                for case in cases
-            ]
+            case_results = [await run_case(model_name, model, case, max_steps) for case in cases]
             results.append(
                 ModelResult(
                     model=model_name,
@@ -250,8 +246,7 @@ async def run_case(
         stop_reason = "error"
 
     tool_calls = tuple(
-        {"name": call.name, "arguments": call.arguments}
-        for call in observer.tool_calls
+        {"name": call.name, "arguments": call.arguments} for call in observer.tool_calls
     )
     score, max_score, passed, detail, rubric, warnings = score_case(
         case,
@@ -669,7 +664,7 @@ def _text_after_last_think_block(text: str) -> str:
     index = lower.rfind(marker)
     if index < 0:
         return ""
-    return text[index + len(marker):]
+    return text[index + len(marker) :]
 
 
 def _has_numbers(
@@ -791,7 +786,9 @@ def render_markdown(results: tuple[ModelResult, ...]) -> str:
     ]
     for result in results:
         if not result.available:
-            lines.append(f"| `{result.model}` | n/a | n/a | {result.duration_seconds:.1f}s | unavailable |")
+            lines.append(
+                f"| `{result.model}` | n/a | n/a | {result.duration_seconds:.1f}s | unavailable |"
+            )
             continue
         status = result.error or "ok"
         lines.append(
@@ -812,10 +809,16 @@ def render_markdown(results: tuple[ModelResult, ...]) -> str:
     lines.extend(["| Component | Points | Meaning |", "| --- | ---: | --- |"])
     lines.append("| Answer correctness | 35 | Expected facts/terms appear in the final answer. |")
     lines.append("| Completion | 10 | Agent turn completed without hitting an error/step limit. |")
-    lines.append("| Tool selection | 20 | Required tools were called, or no unexpected tools were called. |")
-    lines.append("| Tool arguments | 20 | Tool arguments matched the requested metric, dimension, SQL terms, or numeric values. |")
+    lines.append(
+        "| Tool selection | 20 | Required tools were called, or no unexpected tools were called. |"
+    )
+    lines.append(
+        "| Tool arguments | 20 | Tool arguments matched the requested metric, dimension, SQL terms, or numeric values. |"
+    )
     lines.append("| Tool efficiency | 5 | No excessive repeated tool calls. |")
-    lines.append("| Output hygiene | 10 | Final answer is clean: no visible `<think>` trace and not empty. |")
+    lines.append(
+        "| Output hygiene | 10 | Final answer is clean: no visible `<think>` trace and not empty. |"
+    )
 
     lines.extend(["", "## Case Details", ""])
     for result in results:
@@ -855,7 +858,9 @@ def render_markdown(results: tuple[ModelResult, ...]) -> str:
 
 
 def _fastest_available_duration(results: tuple[ModelResult, ...]) -> float | None:
-    durations = [result.duration_seconds for result in results if result.available and not result.error]
+    durations = [
+        result.duration_seconds for result in results if result.available and not result.error
+    ]
     return min(durations) if durations else None
 
 

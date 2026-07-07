@@ -32,11 +32,13 @@ class ScriptedStreamingModel:
 
 def test_streaming_adapter_accumulates_text_chunks() -> None:
     async def run() -> None:
-        model = ScriptedStreamingModel([
-            ModelChunk(text="Hello "),
-            ModelChunk(text="world"),
-            ModelChunk(text="!", done=True),
-        ])
+        model = ScriptedStreamingModel(
+            [
+                ModelChunk(text="Hello "),
+                ModelChunk(text="world"),
+                ModelChunk(text="!", done=True),
+            ]
+        )
         adapter = StreamingModelAdapter(model)
 
         response = await adapter.chat(ModelRequest(messages=()))
@@ -51,11 +53,13 @@ def test_streaming_adapter_accumulates_tool_calls() -> None:
     async def run() -> None:
         call1 = ToolCall(name="search", arguments={"q": "test"}, id="c1")
         call2 = ToolCall(name="fetch", arguments={"url": "http://x"}, id="c2")
-        model = ScriptedStreamingModel([
-            ModelChunk(tool_calls=(call1,)),
-            ModelChunk(tool_calls=(call2,)),
-            ModelChunk(done=True),
-        ])
+        model = ScriptedStreamingModel(
+            [
+                ModelChunk(tool_calls=(call1,)),
+                ModelChunk(tool_calls=(call2,)),
+                ModelChunk(done=True),
+            ]
+        )
         adapter = StreamingModelAdapter(model)
 
         response = await adapter.chat(ModelRequest(messages=()))
@@ -70,11 +74,13 @@ def test_streaming_adapter_accumulates_tool_calls() -> None:
 def test_streaming_adapter_assembles_fragmented_tool_call() -> None:
     # A provider streams one call across chunks (same id, argument fragments).
     async def run() -> None:
-        model = ScriptedStreamingModel([
-            ModelChunk(tool_calls=(ToolCall(name="search", arguments={"q": "hi"}, id="c1"),)),
-            ModelChunk(tool_calls=(ToolCall(name="", arguments={"limit": 5}, id="c1"),)),
-            ModelChunk(done=True),
-        ])
+        model = ScriptedStreamingModel(
+            [
+                ModelChunk(tool_calls=(ToolCall(name="search", arguments={"q": "hi"}, id="c1"),)),
+                ModelChunk(tool_calls=(ToolCall(name="", arguments={"limit": 5}, id="c1"),)),
+                ModelChunk(done=True),
+            ]
+        )
         adapter = StreamingModelAdapter(model)
 
         response = await adapter.chat(ModelRequest(messages=()))
@@ -88,10 +94,12 @@ def test_streaming_adapter_assembles_fragmented_tool_call() -> None:
 
 def test_streaming_adapter_captures_usage() -> None:
     async def run() -> None:
-        model = ScriptedStreamingModel([
-            ModelChunk(text="partial"),
-            ModelChunk(usage=Usage(input_tokens=15, output_tokens=25), done=True),
-        ])
+        model = ScriptedStreamingModel(
+            [
+                ModelChunk(text="partial"),
+                ModelChunk(usage=Usage(input_tokens=15, output_tokens=25), done=True),
+            ]
+        )
         adapter = StreamingModelAdapter(model)
 
         response = await adapter.chat(ModelRequest(messages=()))
@@ -104,10 +112,12 @@ def test_streaming_adapter_captures_usage() -> None:
 
 def test_streaming_adapter_works_with_default_agent() -> None:
     async def run() -> None:
-        model = ScriptedStreamingModel([
-            ModelChunk(text="Hello "),
-            ModelChunk(text="from stream", done=True),
-        ])
+        model = ScriptedStreamingModel(
+            [
+                ModelChunk(text="Hello "),
+                ModelChunk(text="from stream", done=True),
+            ]
+        )
         adapter = StreamingModelAdapter(model)
         agent = DefaultAgent(adapter)
 
@@ -134,10 +144,12 @@ def test_streaming_adapter_handles_empty_stream() -> None:
 
 def test_streaming_adapter_last_usage_wins() -> None:
     async def run() -> None:
-        model = ScriptedStreamingModel([
-            ModelChunk(text="a", usage=Usage(input_tokens=5, output_tokens=5)),
-            ModelChunk(text="b", usage=Usage(input_tokens=10, output_tokens=20), done=True),
-        ])
+        model = ScriptedStreamingModel(
+            [
+                ModelChunk(text="a", usage=Usage(input_tokens=5, output_tokens=5)),
+                ModelChunk(text="b", usage=Usage(input_tokens=10, output_tokens=20), done=True),
+            ]
+        )
         adapter = StreamingModelAdapter(model)
 
         response = await adapter.chat(ModelRequest(messages=()))

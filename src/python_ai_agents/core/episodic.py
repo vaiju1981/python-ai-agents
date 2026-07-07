@@ -31,11 +31,9 @@ class Episode:
 class EpisodicStore(Protocol):
     """Stores and recalls episodes, scoped by tenant."""
 
-    async def record(self, episode: Episode) -> None:
-        ...
+    async def record(self, episode: Episode) -> None: ...
 
-    async def recall(self, tenant: str, query: str, limit: int) -> list[Episode]:
-        ...
+    async def recall(self, tenant: str, query: str, limit: int) -> list[Episode]: ...
 
 
 @dataclass
@@ -54,8 +52,7 @@ class InMemoryEpisodicStore:
 
     async def recall(self, tenant: str, query: str, limit: int) -> list[Episode]:
         results = [
-            ep for ep in self._entries.values()
-            if ep.tenant == tenant and _matches(query, ep.task)
+            ep for ep in self._entries.values() if ep.tenant == tenant and _matches(query, ep.task)
         ]
         return results[:limit]
 

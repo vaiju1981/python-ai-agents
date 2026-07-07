@@ -125,7 +125,9 @@ def test_sqlite_conversation_store_persists_across_instances(tmp_path) -> None:
             Message.user("second"),
             Message.assistant("first / second"),
         )
-        assert [session.session_id for session in restored.list_sessions("tenant-a")] == ["session-1"]
+        assert [session.session_id for session in restored.list_sessions("tenant-a")] == [
+            "session-1"
+        ]
 
     anyio.run(run)
 

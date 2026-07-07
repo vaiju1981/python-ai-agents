@@ -38,7 +38,9 @@ def test_extract_structured_parses_valid_json() -> None:
     async def run() -> None:
         model = ScriptedModel(['{"name": "Alice", "age": 30, "email": "alice@test.com"}'])
         result = await extract_structured(
-            model, PersonInfo, "Extract person info from: Alice is 30 years old",
+            model,
+            PersonInfo,
+            "Extract person info from: Alice is 30 years old",
             RequestContext.ephemeral(),
         )
 
@@ -55,7 +57,9 @@ def test_extract_structured_handles_json_fences() -> None:
     async def run() -> None:
         model = ScriptedModel(['```json\n{"name": "Bob", "age": 25}\n```'])
         result = await extract_structured(
-            model, PersonInfo, "Bob is 25",
+            model,
+            PersonInfo,
+            "Bob is 25",
             RequestContext.ephemeral(),
         )
 
@@ -68,12 +72,16 @@ def test_extract_structured_handles_json_fences() -> None:
 
 def test_extract_structured_retries_on_invalid_json() -> None:
     async def run() -> None:
-        model = ScriptedModel([
-            "not json at all",
-            '{"name": "Charlie", "age": 40}',
-        ])
+        model = ScriptedModel(
+            [
+                "not json at all",
+                '{"name": "Charlie", "age": 40}',
+            ]
+        )
         result = await extract_structured(
-            model, PersonInfo, "Charlie is 40",
+            model,
+            PersonInfo,
+            "Charlie is 40",
             RequestContext.ephemeral(),
             max_retries=2,
         )
@@ -89,7 +97,9 @@ def test_extract_structured_returns_none_after_max_retries() -> None:
     async def run() -> None:
         model = ScriptedModel(["invalid", "still invalid", "nope"])
         result = await extract_structured(
-            model, PersonInfo, "test",
+            model,
+            PersonInfo,
+            "test",
             RequestContext.ephemeral(),
             max_retries=2,
         )
@@ -105,7 +115,9 @@ def test_extract_structured_includes_schema_in_prompt() -> None:
     async def run() -> None:
         model = ScriptedModel(['{"name": "Test", "age": 1}'])
         await extract_structured(
-            model, PersonInfo, "test input",
+            model,
+            PersonInfo,
+            "test input",
             RequestContext.ephemeral(),
         )
 
@@ -123,7 +135,9 @@ def test_extract_structured_with_system_prompt() -> None:
     async def run() -> None:
         model = ScriptedModel(['{"name": "Dan", "age": 50}'])
         result = await extract_structured(
-            model, PersonInfo, "Dan is 50",
+            model,
+            PersonInfo,
+            "Dan is 50",
             RequestContext.ephemeral(),
             system_prompt="You are a helpful assistant.",
         )

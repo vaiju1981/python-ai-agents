@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from python_ai_agents.core.context import RequestContext
-from python_ai_agents.core.tool import Tool, ToolEffect, ToolResult, ToolSpec
+from python_ai_agents.core.tool import ToolEffect, ToolResult, ToolSpec
 
 __all__ = ["McpToolAdapter"]
 
@@ -56,7 +56,7 @@ class McpToolAdapter:
         transport: Any,
         *,
         effect: ToolEffect = ToolEffect.READ_ONLY,
-    ) -> "McpToolAdapter":
+    ) -> McpToolAdapter:
         """Build a ``McpToolAdapter`` from an MCP tool definition dict."""
         name = tool_def.get("name", "")
         description = tool_def.get("description", "")

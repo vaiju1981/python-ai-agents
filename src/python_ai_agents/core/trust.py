@@ -23,7 +23,6 @@ from python_ai_agents.core.tool import (
     ToolSpec,
 )
 
-
 DEADLINE_MESSAGE = "I ran out of time on this request."
 
 
@@ -60,7 +59,9 @@ class GovernedAgent:
     async def _governed_turn(self, request: AgentRequest) -> AgentResponse:
         in_decision = await self._apply_guardrails(GuardrailStage.INPUT, request.input, request)
         if in_decision.blocked:
-            await self._audit("guardrail.block", request, f"stage=INPUT reason={in_decision.reason}")
+            await self._audit(
+                "guardrail.block", request, f"stage=INPUT reason={in_decision.reason}"
+            )
             return AgentResponse.blocked_response(in_decision.content, in_decision.reason)
 
         response = await self.delegate.run(AgentRequest(in_decision.content, request.context))

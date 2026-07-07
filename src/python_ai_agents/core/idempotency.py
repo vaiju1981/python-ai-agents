@@ -10,11 +10,9 @@ from python_ai_agents.core.agent import Agent, AgentRequest, AgentResponse
 class IdempotencyStore(Protocol):
     """Stores prior turn results by tenant and caller-scoped idempotency key."""
 
-    async def lookup(self, tenant: str, key: str) -> AgentResponse | None:
-        ...
+    async def lookup(self, tenant: str, key: str) -> AgentResponse | None: ...
 
-    async def save(self, tenant: str, key: str, response: AgentResponse) -> None:
-        ...
+    async def save(self, tenant: str, key: str, response: AgentResponse) -> None: ...
 
 
 class InMemoryIdempotencyStore:

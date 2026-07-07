@@ -133,9 +133,7 @@ class StoreCheckpointSaver(BaseCheckpointSaver[Any]):
         doc: dict[str, Any] = {
             "checkpoint_id": checkpoint["id"],
             "checkpoint_typed": _dumps_typed(self.serde, ckpt),
-            "metadata_typed": _dumps_typed(
-                self.serde, get_checkpoint_metadata(config, metadata)
-            ),
+            "metadata_typed": _dumps_typed(self.serde, get_checkpoint_metadata(config, metadata)),
             "parent_checkpoint_id": get_checkpoint_id(config),
             "channel_versions": dict(checkpoint.get("channel_versions", {})),
             "blobs": blobs,
@@ -196,6 +194,7 @@ class StoreCheckpointSaver(BaseCheckpointSaver[Any]):
             return
         doc = json.loads(stored.payload_json)
         yield _to_tuple(doc, thread_id, self.serde)
+
 
 # ---------------------------------------------------------------------------
 # Agent ↔ LangGraph node bridge
@@ -273,9 +272,7 @@ class LangGraphAgent:
             return AgentResponse.completed(output)
         except Exception as exc:
             await self._audit("turn.error", ctx, f"error={exc.__class__.__name__}")
-            return AgentResponse.stopped(
-                "I ran into a problem with the workflow.", "model_error"
-            )
+            return AgentResponse.stopped("I ran into a problem with the workflow.", "model_error")
         finally:
             await self._audit("turn.end", ctx, end_reason)
 
@@ -370,8 +367,7 @@ def _to_tuple(
 
     writes_map: dict[str, list[Any]] = doc.get("writes", {})
     pending_writes: list[tuple[str, str, Any]] = [
-        (entry[0], entry[1], _loads_typed(serde, entry[2]))
-        for entry in writes_map.values()
+        (entry[0], entry[1], _loads_typed(serde, entry[2])) for entry in writes_map.values()
     ]
 
     return CheckpointTuple(

@@ -23,7 +23,6 @@ from demos.analytics.src.analytics.semantic_model import SemanticModel
 from demos.analytics.src.analytics.toolset import AnalyticsToolset
 from python_ai_agents.adapters import DEFAULT_OLLAMA_TEST_MODELS, OllamaModelPort
 
-
 DEFAULT_REDROCK_DATA_DIR = Path("/Users/vaijanath.rao/ga_cache/training_data")
 DEFAULT_SAMPLE_ROWS = 250
 

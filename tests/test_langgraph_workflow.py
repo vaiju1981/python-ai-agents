@@ -246,6 +246,7 @@ def test_interrupt_before_pauses_and_resume_continues() -> None:
 
 def test_interrupt_persists_checkpoint_across_saver_instances() -> None:
     """A crash between the first and second call should be recoverable."""
+
     async def run() -> None:
         import tempfile
         from pathlib import Path

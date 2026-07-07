@@ -104,5 +104,4 @@ class Agent(Protocol):
     implement this protocol.
     """
 
-    async def run(self, request: AgentRequest) -> AgentResponse:
-        ...
+    async def run(self, request: AgentRequest) -> AgentResponse: ...

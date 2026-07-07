@@ -45,13 +45,7 @@ class SchemaHintModel:
 
 def test_llm_schema_refinement_can_override_csv_roles(tmp_path) -> None:
     csv = tmp_path / "transactions.csv"
-    csv.write_text(
-        "customer_id,status_code,revenue_cents\n"
-        "1,A,101\n"
-        "2,B,205\n"
-        "3,A,309\n"
-        "4,C,410\n"
-    )
+    csv.write_text("customer_id,status_code,revenue_cents\n1,A,101\n2,B,205\n3,A,309\n4,C,410\n")
     source = CsvSource(named_csvs={"transactions": csv})
     try:
         profile = profile_dataset(source)

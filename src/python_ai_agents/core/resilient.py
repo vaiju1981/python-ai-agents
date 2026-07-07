@@ -49,9 +49,8 @@ class ResilientModelPort:
                 with anyio.move_on_after(self.timeout_seconds) as scope:
                     result = await self.delegate.chat(request)
                 if scope.cancel_called:
-                    raise TimeoutError(
-                        f"model call timed out after {self.timeout_seconds}s"
-                    )
+                    raise TimeoutError(f"model call timed out after {self.timeout_seconds}s")
+                assert result is not None  # assigned inside the move_on_after block
                 return result
             except Exception as exc:
                 if not self.retryable(exc) or attempt >= self.max_attempts:
@@ -83,9 +82,7 @@ class ReplayModelPort:
 
     async def chat(self, request: ModelRequest) -> ModelResponse:
         if self._index >= len(self.recorded):
-            raise RuntimeError(
-                f"replay exhausted: no recorded response for call #{self._index}"
-            )
+            raise RuntimeError(f"replay exhausted: no recorded response for call #{self._index}")
         response = self.recorded[self._index]
         self._index += 1
         return response

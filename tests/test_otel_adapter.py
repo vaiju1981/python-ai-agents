@@ -1,5 +1,7 @@
 """Tests for the OpenTelemetry observer adapter. Skips if opentelemetry not installed."""
+
 import importlib.util
+
 import pytest
 
 otel_available = importlib.util.find_spec("opentelemetry") is not None

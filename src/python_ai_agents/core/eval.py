@@ -47,8 +47,7 @@ class EvalResult:
 class Scorer(Protocol):
     """Scores an agent response against an eval case."""
 
-    def score(self, case: EvalCase, response: AgentResponse) -> tuple[bool, str]:
-        ...
+    def score(self, case: EvalCase, response: AgentResponse) -> tuple[bool, str]: ...
 
 
 @dataclass(frozen=True, slots=True)

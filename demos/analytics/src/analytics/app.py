@@ -68,7 +68,7 @@ class _RowCapture(NoopAgentObserver):
     async def on_tool_result(self, tool_name: str, result: ToolResult, latency: object) -> None:
         if result.error:
             return
-        rows = _extract_rows(result.output)
+        rows = _extract_rows(result.content)
         if rows:
             self.rows = rows
 

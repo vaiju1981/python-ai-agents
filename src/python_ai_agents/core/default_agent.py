@@ -182,13 +182,13 @@ class DefaultAgent:
         await self._record(AuditEvent.now("tool.start", request.context, f"tool={name}"))
         try:
             tool_start = perf_counter()
-            result = await _invoke_with_timeout(
+            outcome = await _invoke_with_timeout(
                 tool,
                 arguments,
                 request,
                 self.tool_timeout_seconds,
             )
-            if result is None:
+            if outcome is None:
                 await self._record(AuditEvent.now("tool.timeout", request.context, f"tool={name}"))
                 timed_out = ToolResult.failed(f"tool '{name}' timed out")
                 await self._notify("on_tool_result", name, timed_out, _duration_since(tool_start))
@@ -200,7 +200,7 @@ class DefaultAgent:
             await self._notify("on_tool_result", name, failed, _duration_since(tool_start))
             return failed
         await self._record(AuditEvent.now("tool.end", request.context, f"tool={name}"))
-        capped = ToolResult(result.content[: self.max_tool_result_chars], result.error)
+        capped = ToolResult(outcome.content[: self.max_tool_result_chars], outcome.error)
         await self._notify("on_tool_result", name, capped, _duration_since(tool_start))
         return capped
 
@@ -210,7 +210,7 @@ class DefaultAgent:
         except Exception:
             return None
 
-    async def _notify(self, method: str, *args) -> None:
+    async def _notify(self, method: str, *args: Any) -> None:
         for observer in self.observers:
             try:
                 callback = getattr(observer, method)

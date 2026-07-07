@@ -27,7 +27,6 @@ presidio = ["presidio-analyzer>=2.2", "presidio-anonymizer>=2.2"]
 guardrails-ai = ["guardrails-ai>=0.5"]
 deepeval = ["deepeval>=1.0"]
 mcp = ["mcp>=1.0"]
-a2a = ["a2a-sdk>=0.1"]
 opentelemetry = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
 llamaindex = ["llama-index>=0.10"]
 analytics-demo = [
@@ -36,6 +35,8 @@ analytics-demo = [
   "plotly>=5.0",
   "streamlit>=1.35",
   "scikit-learn>=1.4",
+  "scipy>=1.11",
+  "statsmodels>=0.14",
 ]
 dev = [
   "jsonschema>=4.20",
@@ -51,9 +52,15 @@ packages = ["src/python_ai_agents"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+extend-exclude = ["tools"]  # dev/benchmark scripts, not shipped code
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests guard optional-dependency imports behind pytest.importorskip(...),
+# which necessarily runs before those imports.
+"tests/**" = ["E402"]
 
 [tool.pytest.ini_options]
 markers = [
@@ -66,3 +73,15 @@ markers = [
 python_version = "3.10"
 strict = true
 packages = ["python_ai_agents"]
+
+[[tool.mypy.overrides]]
+# Optional adapter dependencies that ship no type stubs.
+module = [
+    "guardrails.*",
+    "presidio_analyzer.*",
+    "presidio_anonymizer.*",
+    "deepeval.*",
+    "mcp.*",
+    "jsonschema",
+]
+ignore_missing_imports = true

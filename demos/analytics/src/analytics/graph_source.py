@@ -14,7 +14,6 @@ import duckdb
 
 from demos.analytics.src.analytics.data_source import (
     ColumnSchema,
-    ColumnRole,
     DataSource,
     Relationship,
     TableSchema,
@@ -57,8 +56,7 @@ class GraphSource(DataSource):
                 table_name = _sanitize(label)
                 # Get property keys for this label
                 props_result = session.run(
-                    f"MATCH (n:`{label}`) UNWIND keys(n) AS key "
-                    f"RETURN DISTINCT key ORDER BY key"
+                    f"MATCH (n:`{label}`) UNWIND keys(n) AS key RETURN DISTINCT key ORDER BY key"
                 )
                 props = [r["key"] for r in props_result]
 
@@ -84,16 +82,14 @@ class GraphSource(DataSource):
                 df = pd.DataFrame(rows)
                 self._conn.register("_tmp_graph", df)
                 self._conn.execute(
-                    f"CREATE OR REPLACE TABLE {sql_quote(table_name)} "
-                    f"AS SELECT * FROM _tmp_graph"
+                    f"CREATE OR REPLACE TABLE {sql_quote(table_name)} AS SELECT * FROM _tmp_graph"
                 )
                 self._conn.unregister("_tmp_graph")
                 self._table_names.append(table_name)
 
             # Discover relationships
             rels_result = session.run(
-                "CALL db.relationshipTypes() YIELD relationshipType "
-                "RETURN relationshipType"
+                "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"
             )
             rel_types = [r["relationshipType"] for r in rels_result]
 
@@ -130,9 +126,7 @@ class GraphSource(DataSource):
         result = []
         for name in self._table_names:
             cols = self._table_columns(name)
-            row_count = self._conn.execute(
-                f"SELECT COUNT(*) FROM {sql_quote(name)}"
-            ).fetchone()[0]
+            row_count = self._conn.execute(f"SELECT COUNT(*) FROM {sql_quote(name)}").fetchone()[0]
             result.append(TableSchema(name=name, rows=row_count, columns=tuple(cols)))
         return result
 
@@ -167,6 +161,7 @@ class GraphSource(DataSource):
 
 def _sanitize(name: str) -> str:
     import re
+
     sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", name)
     if sanitized and sanitized[0].isdigit():
         sanitized = "g_" + sanitized

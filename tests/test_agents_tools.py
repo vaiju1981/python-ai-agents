@@ -8,19 +8,20 @@ import pytest
 from python_ai_agents import (
     AgentRequest,
     AgentResponse,
+    ApprovalRequest,
     HumanApprovalToolApprover,
-    InMemoryConversationStore,
     InMemoryAuditSink,
+    InMemoryConversationStore,
     ModelRequest,
     ModelResponse,
     ProductionAgentRuntime,
     RequestContext,
+    ToolCall,
     ToolEffect,
     ToolResult,
+    ToolSpec,
     agent_as_tool,
 )
-from python_ai_agents import ApprovalRequest, ToolCall, ToolSpec
-from python_ai_agents.core.tool import ConsoleToolApprover
 
 
 class ScriptedModel:
@@ -41,7 +42,9 @@ class EchoAgent:
 def test_agent_as_tool_wraps_agent() -> None:
     async def run() -> None:
         tool = agent_as_tool(
-            "research", "gathers facts", EchoAgent(),
+            "research",
+            "gathers facts",
+            EchoAgent(),
             effect=ToolEffect.READ_ONLY,
         )
         assert tool.spec.name == "research"

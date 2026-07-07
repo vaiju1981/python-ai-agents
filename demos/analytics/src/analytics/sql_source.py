@@ -15,7 +15,6 @@ from demos.analytics.src.analytics.data_source import (
     DataSource,
     Relationship,
     TableSchema,
-    sql_quote,
 )
 
 
@@ -56,9 +55,7 @@ class SqlSource(DataSource):
         result = []
         for name in self._table_names:
             cols = self._table_columns(name)
-            row_count = self._conn.execute(
-                f"SELECT COUNT(*) FROM {name}"
-            ).fetchone()[0]
+            row_count = self._conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
             result.append(TableSchema(name=name, rows=row_count, columns=tuple(cols)))
         return result
 

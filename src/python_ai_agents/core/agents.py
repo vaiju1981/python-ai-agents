@@ -12,7 +12,7 @@ import json
 from typing import Any
 from uuid import uuid4
 
-from python_ai_agents.core.agent import Agent, AgentRequest, AgentResponse
+from python_ai_agents.core.agent import Agent, AgentRequest
 from python_ai_agents.core.context import RequestContext
 from python_ai_agents.core.tool import Tool, ToolEffect, ToolResult, ToolSpec
 
@@ -47,7 +47,7 @@ def agent_as_tool(
     spec = ToolSpec(name=name, description=description, input_schema=schema, effect=effect)
 
     class _AgentTool:
-        def __init__(self):
+        def __init__(self) -> None:
             self._spec = spec
             self._agent = agent
 

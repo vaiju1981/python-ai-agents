@@ -21,5 +21,7 @@ class JsonSchemaToolArgumentValidator:
             Draft202012Validator.check_schema(spec.input_schema)
             Draft202012Validator(spec.input_schema).validate(arguments)
         except ValidationError as exc:
-            return ToolDecision.deny(f"tool '{spec.name}' arguments failed schema validation: {exc.message}")
+            return ToolDecision.deny(
+                f"tool '{spec.name}' arguments failed schema validation: {exc.message}"
+            )
         return ToolDecision.allow()

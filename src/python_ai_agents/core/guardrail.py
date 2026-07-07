@@ -33,6 +33,4 @@ class Guardrail(Protocol):
         stage: GuardrailStage,
         content: str,
         context: RequestContext,
-    ) -> GuardrailDecision:
-        ...
-
+    ) -> GuardrailDecision: ...

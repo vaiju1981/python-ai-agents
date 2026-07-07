@@ -45,19 +45,23 @@ def test_episodic_store_keyword_matching() -> None:
 
 
 def test_replay_tool_executor_returns_recorded() -> None:
-    executor = ReplayToolExecutor(recorded={
-        ("echo", '{"message":"hello"}'): ToolResult.ok("hello"),
-    })
+    executor = ReplayToolExecutor(
+        recorded={
+            ("echo", '{"message":"hello"}'): ToolResult.ok("hello"),
+        }
+    )
     result = executor.execute("echo", {"message": "hello"})
     assert not result.error
     assert result.content == "hello"
 
 
 def test_replay_tool_executor_fallback_order() -> None:
-    executor = ReplayToolExecutor(recorded={
-        ("a", '{"x":1}'): ToolResult.ok("a1"),
-        ("b", '{"y":2}'): ToolResult.ok("b2"),
-    })
+    executor = ReplayToolExecutor(
+        recorded={
+            ("a", '{"x":1}'): ToolResult.ok("a1"),
+            ("b", '{"y":2}'): ToolResult.ok("b2"),
+        }
+    )
     # Unknown key → falls back to insertion order
     r1 = executor.execute("unknown", {"z": 0})
     assert r1.content == "a1"

@@ -8,10 +8,9 @@ complex multi-agent workflows, use the LangGraph adapter
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from typing import Protocol
 
 from python_ai_agents.core.agent import Agent, AgentRequest, AgentResponse
-from python_ai_agents.core.context import RequestContext
 
 __all__ = [
     "GroupChatAgent",
@@ -35,8 +34,7 @@ __all__ = [
 class Router(Protocol):
     """Picks the best specialist by name for a given input."""
 
-    def route(self, input_text: str, descriptions: dict[str, str]) -> str:
-        ...
+    def route(self, input_text: str, descriptions: dict[str, str]) -> str: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +71,7 @@ class SupervisorAgent:
         return await agent.run(request)
 
     @staticmethod
-    def builder() -> "_SupervisorBuilder":
+    def builder() -> _SupervisorBuilder:
         return _SupervisorBuilder()
 
 
@@ -85,18 +83,18 @@ class _SupervisorBuilder:
     _fallback: str = ""
     _first: str = ""
 
-    def specialist(self, name: str, description: str, agent: Agent) -> "_SupervisorBuilder":
+    def specialist(self, name: str, description: str, agent: Agent) -> _SupervisorBuilder:
         if not self._first:
             self._first = name
         self._agents[name] = agent
         self._descriptions[name] = description
         return self
 
-    def router(self, router: Router) -> "_SupervisorBuilder":
+    def router(self, router: Router) -> _SupervisorBuilder:
         self._router = router
         return self
 
-    def fallback(self, name: str) -> "_SupervisorBuilder":
+    def fallback(self, name: str) -> _SupervisorBuilder:
         self._fallback = name
         return self
 
@@ -119,8 +117,7 @@ class _SupervisorBuilder:
 class Handoff(Protocol):
     """Decides whether a peer agent should take over after each hop."""
 
-    def handoff(self, output: str, descriptions: dict[str, str]) -> str | None:
-        ...
+    def handoff(self, output: str, descriptions: dict[str, str]) -> str | None: ...
 
 
 @dataclass(slots=True)
@@ -159,7 +156,7 @@ class HandoffAgent:
         return response  # type: ignore[return-value]
 
     @staticmethod
-    def builder() -> "_HandoffBuilder":
+    def builder() -> _HandoffBuilder:
         return _HandoffBuilder()
 
 
@@ -172,22 +169,22 @@ class _HandoffBuilder:
     _first: str = ""
     _max_hops: int = 5
 
-    def agent(self, name: str, description: str, agent: Agent) -> "_HandoffBuilder":
+    def agent(self, name: str, description: str, agent: Agent) -> _HandoffBuilder:
         if not self._first:
             self._first = name
         self._agents[name] = agent
         self._descriptions[name] = description
         return self
 
-    def handoff(self, handoff: Handoff) -> "_HandoffBuilder":
+    def handoff(self, handoff: Handoff) -> _HandoffBuilder:
         self._handoff = handoff
         return self
 
-    def start(self, name: str) -> "_HandoffBuilder":
+    def start(self, name: str) -> _HandoffBuilder:
         self._start = name
         return self
 
-    def max_hops(self, n: int) -> "_HandoffBuilder":
+    def max_hops(self, n: int) -> _HandoffBuilder:
         self._max_hops = n
         return self
 
@@ -223,17 +220,14 @@ class SpeakerSelector(Protocol):
 
     def next(
         self, task: str, transcript: list[Turn], descriptions: dict[str, str]
-    ) -> str | None:
-        ...
+    ) -> str | None: ...
 
 
 @dataclass(frozen=True, slots=True)
 class RoundRobinSelector:
     """Cycles through speakers in registration order."""
 
-    def next(
-        self, task: str, transcript: list[Turn], descriptions: dict[str, str]
-    ) -> str | None:
+    def next(self, task: str, transcript: list[Turn], descriptions: dict[str, str]) -> str | None:
         names = list(descriptions)
         if not names:
             return None
@@ -252,8 +246,7 @@ class RoundRobinSelector:
 class Manager(Protocol):
     """Decides which worker to delegate to and what subtask to give it."""
 
-    def delegate(self, task: str, descriptions: dict[str, str]) -> tuple[str, str]:
-        ...
+    def delegate(self, task: str, descriptions: dict[str, str]) -> tuple[str, str]: ...
 
 
 @dataclass(slots=True)

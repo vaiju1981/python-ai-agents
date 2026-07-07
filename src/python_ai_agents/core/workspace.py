@@ -23,4 +23,3 @@ class Workspace:
 
     def read_text(self, name: str) -> str:
         return self.path(name).read_text(encoding="utf-8")
-

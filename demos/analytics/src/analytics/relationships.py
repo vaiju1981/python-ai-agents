@@ -34,12 +34,15 @@ def discover(
 
     tables = list(roles_by_table.keys())
     for i, t1 in enumerate(tables):
-        for t2 in tables[i + 1:]:
+        for t2 in tables[i + 1 :]:
             for c1_name, c1_role in roles_by_table[t1].items():
                 if c1_role == ColumnRole.MEASURE_ADDITIVE or c1_role == ColumnRole.MEASURE_RATIO:
                     continue
                 for c2_name, c2_role in roles_by_table[t2].items():
-                    if c2_role == ColumnRole.MEASURE_ADDITIVE or c2_role == ColumnRole.MEASURE_RATIO:
+                    if (
+                        c2_role == ColumnRole.MEASURE_ADDITIVE
+                        or c2_role == ColumnRole.MEASURE_RATIO
+                    ):
                         continue
                     rel = _test_pair(source, t1, c1_name, t2, c2_name)
                     if rel is None:
@@ -65,8 +68,10 @@ def discover(
 
 def _test_pair(
     source: DataSource,
-    t1: str, c1: str,
-    t2: str, c2: str,
+    t1: str,
+    c1: str,
+    t2: str,
+    c2: str,
 ) -> Relationship | None:
     """Test if columns from two tables can join using a JOIN-based approach."""
     q1 = sql_qcol(t1, c1)
@@ -81,8 +86,7 @@ def _test_pair(
         )[0]
         # Stats for t2
         t2_stats = source.native_query(
-            f"SELECT COUNT(DISTINCT {q2}) AS distinct_val "
-            f"FROM {sql_quote(t2)}"
+            f"SELECT COUNT(DISTINCT {q2}) AS distinct_val FROM {sql_quote(t2)}"
         )[0]
         # Overlapping distinct values via JOIN
         overlap = source.native_query(
@@ -145,8 +149,10 @@ def _discover_composite(
 
 def _test_composite(
     source: DataSource,
-    t1: str, cols1: list[str],
-    t2: str, cols2: list[str],
+    t1: str,
+    cols1: list[str],
+    t2: str,
+    cols2: list[str],
 ) -> Relationship | None:
     """Test a composite key join."""
     q1 = ", ".join(sql_qcol(t1, c) for c in cols1)

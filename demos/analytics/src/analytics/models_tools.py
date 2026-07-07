@@ -156,15 +156,25 @@ class ModelsToolset:
             resid_std = float(np.std(np.diff(values))) if len(values) > 1 else 0.0
             band = 1.96 * resid_std
             forecast = [
-                {"step": i + 1, "value": round(float(v), 2),
-                 "low": round(float(v - band), 2), "high": round(float(v + band), 2)}
+                {
+                    "step": i + 1,
+                    "value": round(float(v), 2),
+                    "low": round(float(v - band), 2),
+                    "high": round(float(v + band), 2),
+                }
                 for i, v in enumerate(fc)
             ]
-            return _ok("forecast", {
-                "metric": m_col, "history_periods": len(values), "horizon": horizon,
-                "method": method, "forecast": forecast,
-                "note": "Monthly aggregation; interval ≈ ±1.96×std of month-over-month change.",
-            })
+            return _ok(
+                "forecast",
+                {
+                    "metric": m_col,
+                    "history_periods": len(values),
+                    "horizon": horizon,
+                    "method": method,
+                    "forecast": forecast,
+                    "note": "Monthly aggregation; interval ≈ ±1.96×std of month-over-month change.",
+                },
+            )
 
         return _make_tool(
             "forecast",
@@ -202,13 +212,23 @@ class ModelsToolset:
             t, p = stats.ttest_ind(va, vb, equal_var=False)  # Welch's
             ma, mb = float(va.mean()), float(vb.mean())
             pooled = float(np.sqrt((va.var(ddof=1) + vb.var(ddof=1)) / 2)) or 1.0
-            return _ok("ab_test", {
-                "metric": m_col, "groupA": a, "groupB": b, "nA": int(len(va)), "nB": int(len(vb)),
-                "meanA": round(ma, 4), "meanB": round(mb, 4), "difference": round(ma - mb, 4),
-                "welch_t": round(float(t), 3), "p_value": round(float(p), 4),
-                "cohens_d": round((ma - mb) / pooled, 3),
-                "verdict": "significant at p<0.05" if p < 0.05 else "not significant (p>=0.05)",
-            })
+            return _ok(
+                "ab_test",
+                {
+                    "metric": m_col,
+                    "groupA": a,
+                    "groupB": b,
+                    "nA": int(len(va)),
+                    "nB": int(len(vb)),
+                    "meanA": round(ma, 4),
+                    "meanB": round(mb, 4),
+                    "difference": round(ma - mb, 4),
+                    "welch_t": round(float(t), 3),
+                    "p_value": round(float(p), 4),
+                    "cohens_d": round((ma - mb) / pooled, 3),
+                    "verdict": "significant at p<0.05" if p < 0.05 else "not significant (p>=0.05)",
+                },
+            )
 
         return _make_tool(
             "ab_test",
@@ -238,8 +258,10 @@ class ModelsToolset:
             if tr_table != t_table:
                 return ToolResult.failed("target and treatment must be in the same table")
             controls = [
-                c for x in (args.get("controls") or [])
-                for (ct, c) in [self._resolve(x)] if ct == t_table
+                c
+                for x in (args.get("controls") or [])
+                for (ct, c) in [self._resolve(x)]
+                if ct == t_table
             ]
             cols = list(dict.fromkeys([t_col, tr_col, *controls]))
             df = self._frame(t_table, cols).apply(pd.to_numeric, errors="coerce").dropna()
@@ -249,18 +271,25 @@ class ModelsToolset:
             xd = sm.add_constant(df[[tr_col, *controls]])
             fit = sm.OLS(df[t_col], xd).fit()
             ci = fit.conf_int().loc[tr_col]
-            return _ok("causal_effect", {
-                "target": t_col, "treatment": tr_col, "controls": controls, "n": int(len(df)),
-                "estimated_effect": round(float(fit.params[tr_col]), 4),
-                "ci_95": [round(float(ci[0]), 4), round(float(ci[1]), 4)],
-                "p_value": round(float(fit.pvalues[tr_col]), 4),
-                "r_squared": round(float(fit.rsquared), 3),
-                "caveat": (
-                    "Observational OLS adjusting only for the named controls. This is NOT proof of "
-                    "causation — unmeasured confounders can bias it. For a causal claim, run a "
-                    "randomized experiment (ab_test)."
-                ),
-            })
+            return _ok(
+                "causal_effect",
+                {
+                    "target": t_col,
+                    "treatment": tr_col,
+                    "controls": controls,
+                    "n": int(len(df)),
+                    "estimated_effect": round(float(fit.params[tr_col]), 4),
+                    "ci_95": [round(float(ci[0]), 4), round(float(ci[1]), 4)],
+                    "p_value": round(float(fit.pvalues[tr_col]), 4),
+                    "r_squared": round(float(fit.rsquared), 3),
+                    "caveat": (
+                        "Observational OLS adjusting only for the named controls. "
+                        "This is NOT proof of "
+                        "causation — unmeasured confounders can bias it. For a causal claim, run a "
+                        "randomized experiment (ab_test)."
+                    ),
+                },
+            )
 
         return _make_tool(
             "causal_effect",
@@ -291,8 +320,7 @@ class ModelsToolset:
                 return ToolResult.failed("target and treatment must be in the same table")
             preds = args.get("predictors") or self._numeric_columns(t_table, exclude=t_col)
             pcols = [
-                c for p in preds
-                for (pt, c) in [self._resolve(p)] if pt == t_table and c != tr_col
+                c for p in preds for (pt, c) in [self._resolve(p)] if pt == t_table and c != tr_col
             ]
             if not pcols:
                 return ToolResult.failed("no predictor columns for uplift")
@@ -314,13 +342,20 @@ class ModelsToolset:
             top_decile = up[order[: max(1, len(up) // 10)]]
             corr = np.corrcoef(np.c_[df[pcols].values, up].T)[-1, :-1]
             drivers = _importances(pcols, np.abs(corr))
-            return _ok("uplift", {
-                "target": t_col, "treatment": tr_col, "n": int(len(df)),
-                "mean_uplift": round(float(up.mean()), 4),
-                "top_decile_mean_uplift": round(float(top_decile.mean()), 4),
-                "drivers_of_uplift": drivers,
-                "caveat": "T-learner on observational data; directional, not proof of causation.",
-            })
+            return _ok(
+                "uplift",
+                {
+                    "target": t_col,
+                    "treatment": tr_col,
+                    "n": int(len(df)),
+                    "mean_uplift": round(float(up.mean()), 4),
+                    "top_decile_mean_uplift": round(float(top_decile.mean()), 4),
+                    "drivers_of_uplift": drivers,
+                    "caveat": (
+                        "T-learner on observational data; directional, not proof of causation."
+                    ),
+                },
+            )
 
         return _make_tool(
             "uplift",
@@ -362,19 +397,27 @@ class ModelsToolset:
             labels = KMeans(n_clusters=k, n_init=10, random_state=0).fit_predict(xs)
             sizes = {int(c): int(n) for c, n in zip(*_unique_counts(labels), strict=False)}
             sil = float(silhouette_score(xs, labels)) if k < len(df) else 0.0
-            return _ok("cluster", {
-                "columns": cols, "k": k, "n": int(len(df)),
-                "silhouette": round(sil, 3), "cluster_sizes": sizes,
-                "method": "k-means on standardized features",
-            })
+            return _ok(
+                "cluster",
+                {
+                    "columns": cols,
+                    "k": k,
+                    "n": int(len(df)),
+                    "silhouette": round(sil, 3),
+                    "cluster_sizes": sizes,
+                    "method": "k-means on standardized features",
+                },
+            )
 
         return _make_tool(
             "cluster",
             "Segment rows into k clusters over numeric columns (k-means). Args: columns, k?.",
             _guarded("cluster", impl),
             _object_schema(
-                {"columns": _string_array("Numeric columns to cluster on."),
-                 "k": {"type": "integer", "minimum": 2, "default": 3}},
+                {
+                    "columns": _string_array("Numeric columns to cluster on."),
+                    "k": {"type": "integer", "minimum": 2, "default": 3},
+                },
                 required=("columns",),
             ),
         )
@@ -403,11 +446,17 @@ class ModelsToolset:
             flags = iso.fit_predict(df[cols].values)
             anomalies = df[flags == -1]
             sample = anomalies.head(10).to_dict("records")
-            return _ok("anomaly_detection", {
-                "columns": cols, "n": int(len(df)), "n_anomalies": int((flags == -1).sum()),
-                "contamination": contamination, "examples": sample,
-                "method": "IsolationForest",
-            })
+            return _ok(
+                "anomaly_detection",
+                {
+                    "columns": cols,
+                    "n": int(len(df)),
+                    "n_anomalies": int((flags == -1).sum()),
+                    "contamination": contamination,
+                    "examples": sample,
+                    "method": "IsolationForest",
+                },
+            )
 
         return _make_tool(
             "anomaly_detection",

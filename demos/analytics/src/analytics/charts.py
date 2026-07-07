@@ -13,8 +13,17 @@ from dataclasses import dataclass
 # Column names that almost always mean "time axis".
 _TIME_NAMES = frozenset(
     {
-        "period", "date", "day", "week", "month", "quarter",
-        "year", "time", "ts", "timestamp", "datetime",
+        "period",
+        "date",
+        "day",
+        "week",
+        "month",
+        "quarter",
+        "year",
+        "time",
+        "ts",
+        "timestamp",
+        "datetime",
     }
 )
 

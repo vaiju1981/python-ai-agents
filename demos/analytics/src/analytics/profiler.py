@@ -16,7 +16,6 @@ from demos.analytics.src.analytics.data_source import (
     DataSource,
     Relationship,
     TableSchema,
-    sql_qcol,
     sql_quote,
 )
 from demos.analytics.src.analytics.relationships import discover as discover_relationships
@@ -65,11 +64,14 @@ def profile_column(source: DataSource, table: str, col: ColumnSchema) -> ColumnP
         cd = f"CAST({c} AS DOUBLE)"
         mma = f", MIN({cd}) AS mn, MAX({cd}) AS mx, AVG({cd}) AS av"
         sd = f", stddev_pop({cd}) AS sd"
-        agg = _first_ok(source, [
-            f"{base}{mma}{sd} FROM {t}",
-            f"{base}{mma} FROM {t}",
-            f"{base} FROM {t}",
-        ])
+        agg = _first_ok(
+            source,
+            [
+                f"{base}{mma}{sd} FROM {t}",
+                f"{base}{mma} FROM {t}",
+                f"{base} FROM {t}",
+            ],
+        )
     else:
         agg = source.native_query(f"{base} FROM {t}")[0]
 
@@ -100,7 +102,15 @@ def profile_column(source: DataSource, table: str, col: ColumnSchema) -> ColumnP
 
     min_val = _to_float(agg.get("mn")) if numeric else None
     max_val = _to_float(agg.get("mx")) if numeric else None
-    if numeric and "id-like" not in signals and min_val is not None and min_val >= 1e9 and max_val is not None and max_val <= 5e12 and distinct > 10:
+    if (
+        numeric
+        and "id-like" not in signals
+        and min_val is not None
+        and min_val >= 1e9
+        and max_val is not None
+        and max_val <= 5e12
+        and distinct > 10
+    ):
         signals.add("epoch-like")
 
     return ColumnProfile(
@@ -137,13 +147,18 @@ def profile_dataset(
             cp = profile_column(source, table.name, col)
             columns.append(cp)
             from demos.analytics.src.analytics.semantic_roles import classify_role
+
             role = classify_role(cp)
-            typed_cols.append(ColumnSchema(name=col.name, physical_type=col.physical_type, role=role))
+            typed_cols.append(
+                ColumnSchema(name=col.name, physical_type=col.physical_type, role=role)
+            )
             role_map[col.name] = role
             if "leading-zeros" in cp.signals:
                 import_plan.setdefault(table.name, {})[col.name] = "VARCHAR"
         roles_by_table[table.name] = role_map
-        typed_tables.append(TableSchema(name=table.name, rows=table.rows, columns=tuple(typed_cols)))
+        typed_tables.append(
+            TableSchema(name=table.name, rows=table.rows, columns=tuple(typed_cols))
+        )
 
     stats_by_ref = {f"{cp.table}.{cp.name}": cp for cp in columns}
     relationships = discover_relationships(source, roles_by_table, stats_by_ref)

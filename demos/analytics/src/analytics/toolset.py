@@ -14,7 +14,6 @@ from typing import Any
 from demos.analytics.src.analytics.data_source import DataSource, sql_qcol, sql_quote
 from demos.analytics.src.analytics.query_planner import Filter, QuerySpec, plan
 from demos.analytics.src.analytics.semantic_model import SemanticModel
-
 from python_ai_agents.core.tool import Tool, ToolEffect, ToolResult, ToolSpec
 
 MAX_RESULT_CHARS = 16_000
@@ -70,7 +69,8 @@ class AnalyticsToolset:
         return _make_tool(
             "run_query",
             "Run a metric/dimension query. Args: metrics (list of refs like 'table.metric'), "
-            "dimensions (list), filters (list of {column,op,value}), lastDays (int), timeColumn, limit.",
+            "dimensions (list), filters (list of {column,op,value}), "
+            "lastDays (int), timeColumn, limit.",
             invoke,
             _query_schema(),
         )
@@ -84,10 +84,22 @@ class AnalyticsToolset:
                 dims = tuple(arguments.get("dimensions", []))
                 filters = tuple(Filter(**f) for f in arguments.get("filters", []))
 
-                spec_current = QuerySpec(metrics=metrics, dimensions=dims, filters=filters,
-                                         last_days=last_days, time_column=time_col, offset_days=0)
-                spec_prev = QuerySpec(metrics=metrics, dimensions=dims, filters=filters,
-                                      last_days=last_days, time_column=time_col, offset_days=last_days)
+                spec_current = QuerySpec(
+                    metrics=metrics,
+                    dimensions=dims,
+                    filters=filters,
+                    last_days=last_days,
+                    time_column=time_col,
+                    offset_days=0,
+                )
+                spec_prev = QuerySpec(
+                    metrics=metrics,
+                    dimensions=dims,
+                    filters=filters,
+                    last_days=last_days,
+                    time_column=time_col,
+                    offset_days=last_days,
+                )
 
                 sql_current = plan(self.model, spec_current)
                 sql_prev = plan(self.model, spec_prev)
@@ -95,13 +107,16 @@ class AnalyticsToolset:
                 previous = self.source.native_query_with_limit(sql_prev, 100)
 
                 result = {"current": current, "previous": previous}
-                return ToolResult.ok(_frame("compare", json.dumps(result, default=str)[:MAX_RESULT_CHARS]))
+                return ToolResult.ok(
+                    _frame("compare", json.dumps(result, default=str)[:MAX_RESULT_CHARS])
+                )
             except Exception as exc:
                 return ToolResult.failed(f"compare failed: {exc}")
 
         return _make_tool(
             "compare",
-            "Period-over-period comparison. Args: metrics, timeColumn, lastDays, optional dimensions/filters.",
+            "Period-over-period comparison. "
+            "Args: metrics, timeColumn, lastDays, optional dimensions/filters.",
             invoke,
             _query_schema(required=("metrics", "timeColumn", "lastDays")),
         )
@@ -113,7 +128,6 @@ class AnalyticsToolset:
                 time_col = arguments.get("timeColumn", "")
                 grain = arguments.get("grain", "day")
                 last_days = arguments.get("lastDays", 30)
-                dims = tuple(arguments.get("dimensions", []))
 
                 # Build a time-bucketed group-by query
                 tc = None
@@ -125,23 +139,35 @@ class AnalyticsToolset:
                     return ToolResult.failed(f"time column '{time_col}' not found")
 
                 ts_expr = tc.to_timestamp_sql(sql_qcol(tc.table, tc.column))
-                bucket = f"date_trunc('{grain}', {ts_expr})" if grain != "day" else f"{ts_expr}::date"
+                bucket = (
+                    f"date_trunc('{grain}', {ts_expr})" if grain != "day" else f"{ts_expr}::date"
+                )
 
-                resolved_metrics = [m for m in self.model.metrics if m.ref in metrics or m.column in metrics]
+                resolved_metrics = [
+                    m for m in self.model.metrics if m.ref in metrics or m.column in metrics
+                ]
                 select_parts = [f"{bucket} AS period"]
                 for m in resolved_metrics:
-                    select_parts.append(f"{m.aggregation.upper()}({sql_qcol(m.table, m.column)}) AS {m.column}")
+                    select_parts.append(
+                        f"{m.aggregation.upper()}({sql_qcol(m.table, m.column)}) AS {m.column}"
+                    )
 
                 where = f"WHERE {ts_expr} >= current_timestamp - INTERVAL '{last_days} days'"
-                sql = f"SELECT {', '.join(select_parts)} FROM {sql_quote(tc.table)} {where} GROUP BY period ORDER BY period"
+                sql = (
+                    f"SELECT {', '.join(select_parts)} FROM {sql_quote(tc.table)} {where} "
+                    "GROUP BY period ORDER BY period"
+                )
                 rows = self.source.native_query_with_limit(sql, 100)
-                return ToolResult.ok(_frame("trend", json.dumps(rows, default=str)[:MAX_RESULT_CHARS]))
+                return ToolResult.ok(
+                    _frame("trend", json.dumps(rows, default=str)[:MAX_RESULT_CHARS])
+                )
             except Exception as exc:
                 return ToolResult.failed(f"trend failed: {exc}")
 
         return _make_tool(
             "trend",
-            "Time-series trend by day/week/month. Args: metrics, timeColumn, grain (day/week/month), lastDays.",
+            "Time-series trend by day/week/month. "
+            "Args: metrics, timeColumn, grain (day/week/month), lastDays.",
             invoke,
             _object_schema(
                 {
@@ -166,12 +192,15 @@ class AnalyticsToolset:
                 q = sql_qcol(m.table, m.column)
                 stats = self.source.native_query(
                     f"SELECT MIN({q}) AS min, MAX({q}) AS max, AVG({q}) AS mean, "
-                    f"stddev_pop({q}) AS std, percentile_cont(0.25) WITHIN GROUP (ORDER BY {q}) AS p25, "
+                    f"stddev_pop({q}) AS std, "
+                    f"percentile_cont(0.25) WITHIN GROUP (ORDER BY {q}) AS p25, "
                     f"percentile_cont(0.5) WITHIN GROUP (ORDER BY {q}) AS p50, "
                     f"percentile_cont(0.75) WITHIN GROUP (ORDER BY {q}) AS p75 "
                     f"FROM {sql_quote(m.table)}"
                 )
-                return ToolResult.ok(_frame("summarize", json.dumps(stats[0] if stats else {}, default=str)))
+                return ToolResult.ok(
+                    _frame("summarize", json.dumps(stats[0] if stats else {}, default=str))
+                )
             except Exception as exc:
                 return ToolResult.failed(f"summarize failed: {exc}")
 
@@ -189,7 +218,9 @@ class AnalyticsToolset:
         async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
             try:
                 target = arguments.get("target", "")
-                resolved_target = [m for m in self.model.metrics if m.ref == target or m.column == target]
+                resolved_target = [
+                    m for m in self.model.metrics if m.ref == target or m.column == target
+                ]
                 if not resolved_target:
                     return ToolResult.failed(f"target metric '{target}' not found")
                 t = resolved_target[0]
@@ -206,7 +237,11 @@ class AnalyticsToolset:
                             f"SELECT corr({q1}, {q2}) AS r FROM {sql_quote(t.table)} "
                             f"WHERE {q1} IS NOT NULL AND {q2} IS NOT NULL"
                         )
-                        r_val = float(row[0].get("r", 0)) if row and row[0].get("r") is not None else 0.0
+                        r_val = (
+                            float(row[0].get("r", 0))
+                            if row and row[0].get("r") is not None
+                            else 0.0
+                        )
                         if abs(r_val) > 0.1:
                             results.append({"metric": m.column, "correlation": round(r_val, 3)})
                     except Exception:
@@ -243,7 +278,9 @@ class AnalyticsToolset:
                     f"ORDER BY ABS({q}) DESC LIMIT 20",
                     20,
                 )
-                return ToolResult.ok(_frame("outliers", json.dumps(rows, default=str)[:MAX_RESULT_CHARS]))
+                return ToolResult.ok(
+                    _frame("outliers", json.dumps(rows, default=str)[:MAX_RESULT_CHARS])
+                )
             except Exception as exc:
                 return ToolResult.failed(f"outliers failed: {exc}")
 
@@ -264,16 +301,20 @@ class AnalyticsToolset:
         async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
             try:
                 target = arguments.get("target", "")
-                resolved_target = [m for m in self.model.metrics if m.ref == target or m.column == target]
+                resolved_target = [
+                    m for m in self.model.metrics if m.ref == target or m.column == target
+                ]
                 if not resolved_target:
                     return ToolResult.failed(f"target metric '{target}' not found")
                 t = resolved_target[0]
-                predictors = [m for m in self.model.metrics if m.table == t.table and m.ref != t.ref]
+                predictors = [
+                    m for m in self.model.metrics if m.table == t.table and m.ref != t.ref
+                ]
                 if not predictors:
                     return ToolResult.failed("no predictor metrics found in same table")
 
-                from sklearn.linear_model import LinearRegression
                 import numpy as np
+                from sklearn.linear_model import LinearRegression
 
                 cols = [t.column] + [p.column for p in predictors]
                 col_select = ", ".join(sql_qcol(t.table, c) for c in cols)
@@ -290,8 +331,10 @@ class AnalyticsToolset:
                 model = LinearRegression().fit(X, y)
                 result = {
                     "target": t.column,
-                    "predictors": [{"name": p.column, "coefficient": round(float(model.coef_[i]), 4)}
-                                   for i, p in enumerate(predictors)],
+                    "predictors": [
+                        {"name": p.column, "coefficient": round(float(model.coef_[i]), 4)}
+                        for i, p in enumerate(predictors)
+                    ],
                     "intercept": round(float(model.intercept_), 4),
                     "r_squared": round(float(model.score(X, y)), 4),
                 }
@@ -319,7 +362,9 @@ class AnalyticsToolset:
                 if reason is not None:
                     return ToolResult.failed(reason)
                 rows = self.source.native_query_with_limit(sql, 500)
-                return ToolResult.ok(_frame("run_sql", json.dumps(rows, default=str)[:MAX_RESULT_CHARS]))
+                return ToolResult.ok(
+                    _frame("run_sql", json.dumps(rows, default=str)[:MAX_RESULT_CHARS])
+                )
             except Exception as exc:
                 return ToolResult.failed(f"run_sql failed: {exc}")
 
@@ -355,6 +400,7 @@ def _make_tool(
     input_schema: dict[str, Any],
 ) -> Tool:
     """Create a Tool with a READ_ONLY effect."""
+
     class _AnalyticsTool:
         def __init__(self) -> None:
             self._spec = ToolSpec(
@@ -448,7 +494,11 @@ def _format_rows(sql: str, rows: list[dict[str, Any]]) -> str:
     if not rows:
         return f"SQL: {sql}\n(no rows returned)"
     import json
-    return _frame("run_query", f"SQL: {sql}\nRows ({len(rows)}):\n{json.dumps(rows, default=str)[:MAX_RESULT_CHARS]}")
+
+    return _frame(
+        "run_query",
+        f"SQL: {sql}\nRows ({len(rows)}):\n{json.dumps(rows, default=str)[:MAX_RESULT_CHARS]}",
+    )
 
 
 def _read_only_sql_error(sql: str) -> str | None:

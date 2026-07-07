@@ -9,10 +9,9 @@ boundary around the finished agent.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 from python_ai_agents.core.agent import Agent, AgentRequest, AgentResponse
-from python_ai_agents.core.audit import AuditSink, NullAuditSink
+from python_ai_agents.core.audit import AuditSink
 from python_ai_agents.core.default_agent import DefaultAgent
 from python_ai_agents.core.guardrail import Guardrail
 from python_ai_agents.core.memory import ConversationStore
@@ -23,10 +22,10 @@ from python_ai_agents.core.tool import (
     ApprovalHandler,
     DenyEffectfulTools,
     HumanApprovalToolApprover,
+    NoopToolArgumentValidator,
     Tool,
     ToolApprover,
     ToolArgumentValidator,
-    NoopToolArgumentValidator,
 )
 from python_ai_agents.core.trust import Trust
 
@@ -49,7 +48,7 @@ class ProductionAgentRuntime:
         return await self.delegate.run(request)
 
     @staticmethod
-    def builder() -> "_Builder":
+    def builder() -> _Builder:
         return _Builder()
 
 
@@ -73,47 +72,47 @@ class _Builder:
     max_tool_result_chars: int = 8_000
     max_steps: int = 8
 
-    def with_model(self, model: ModelPort) -> "_Builder":
+    def with_model(self, model: ModelPort) -> _Builder:
         self.model = model
         return self
 
-    def with_conversation_store(self, store: ConversationStore) -> "_Builder":
+    def with_conversation_store(self, store: ConversationStore) -> _Builder:
         self.conversation_store = store
         return self
 
-    def with_audit_sink(self, sink: AuditSink) -> "_Builder":
+    def with_audit_sink(self, sink: AuditSink) -> _Builder:
         self.audit_sink = sink
         return self
 
-    def with_argument_validator(self, validator: ToolArgumentValidator) -> "_Builder":
+    def with_argument_validator(self, validator: ToolArgumentValidator) -> _Builder:
         self.argument_validator = validator
         return self
 
-    def with_tool_approver(self, approver: ToolApprover) -> "_Builder":
+    def with_tool_approver(self, approver: ToolApprover) -> _Builder:
         self.tool_approver = approver
         return self
 
-    def with_approval_handler(self, handler: ApprovalHandler) -> "_Builder":
+    def with_approval_handler(self, handler: ApprovalHandler) -> _Builder:
         self.approval_handler = handler
         return self
 
-    def tool(self, tool: Tool) -> "_Builder":
+    def tool(self, tool: Tool) -> _Builder:
         self.tools.append(tool)
         return self
 
-    def guardrail(self, guardrail: Guardrail) -> "_Builder":
+    def guardrail(self, guardrail: Guardrail) -> _Builder:
         self.guardrails.append(guardrail)
         return self
 
-    def observer(self, observer: AgentObserver) -> "_Builder":
+    def observer(self, observer: AgentObserver) -> _Builder:
         self.observers.append(observer)
         return self
 
-    def raw_observer(self, observer: AgentObserver) -> "_Builder":
+    def raw_observer(self, observer: AgentObserver) -> _Builder:
         self.raw_observers.append(observer)
         return self
 
-    def with_system_prompt(self, prompt: str) -> "_Builder":
+    def with_system_prompt(self, prompt: str) -> _Builder:
         self.system_prompt = prompt
         return self
 

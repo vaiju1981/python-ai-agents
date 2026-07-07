@@ -85,5 +85,4 @@ class ModelResponse:
 
 
 class ModelPort(Protocol):
-    async def chat(self, request: ModelRequest) -> ModelResponse:
-        ...
+    async def chat(self, request: ModelRequest) -> ModelResponse: ...

@@ -2,23 +2,20 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import anyio
 import pytest
 
 # Skip if duckdb not installed
 duckdb = pytest.importorskip("duckdb")
 
-from demos.analytics.src.analytics.csv_source import CsvSource
 from demos.analytics.src.analytics.agent import create_agent
-from demos.analytics.src.analytics.profiler import profile_dataset, profile_column
+from demos.analytics.src.analytics.csv_source import CsvSource
+from demos.analytics.src.analytics.data_source import ColumnRole, Relationship
+from demos.analytics.src.analytics.profiler import profile_dataset
+from demos.analytics.src.analytics.query_planner import Filter, QuerySpec, plan
 from demos.analytics.src.analytics.semantic_model import Dimension, Metric, SemanticModel
-from demos.analytics.src.analytics.query_planner import plan, QuerySpec, Filter
 from demos.analytics.src.analytics.semantic_roles import classify_role
 from demos.analytics.src.analytics.toolset import AnalyticsToolset
-from demos.analytics.src.analytics.data_source import ColumnRole, Relationship
-
 from python_ai_agents import RequestContext, ToolEffect
 
 
@@ -100,11 +97,14 @@ def test_semantic_model(source):
 def test_query_planner_single_table(source):
     profile = profile_dataset(source)
     semantic = SemanticModel.from_profile(profile)
-    sql = plan(semantic, QuerySpec(
-        metrics=("sales.amount",),
-        dimensions=("sales.region",),
-        limit=5,
-    ))
+    sql = plan(
+        semantic,
+        QuerySpec(
+            metrics=("sales.amount",),
+            dimensions=("sales.region",),
+            limit=5,
+        ),
+    )
     rows = source.native_query_with_limit(sql, 10)
     assert len(rows) == 4  # 4 distinct regions
     assert "amount" in rows[0]
@@ -121,11 +121,14 @@ def test_query_planner_aggregation(source):
 def test_query_planner_with_filter(source):
     profile = profile_dataset(source)
     semantic = SemanticModel.from_profile(profile)
-    sql = plan(semantic, QuerySpec(
-        metrics=("sales.amount",),
-        dimensions=("sales.region",),
-        filters=(Filter(column="sales.region", op="=", value="North"),),
-    ))
+    sql = plan(
+        semantic,
+        QuerySpec(
+            metrics=("sales.amount",),
+            dimensions=("sales.region",),
+            filters=(Filter(column="sales.region", op="=", value="North"),),
+        ),
+    )
     rows = source.native_query_with_limit(sql, 10)
     assert len(rows) == 1
     assert rows[0]["region"] == "North"

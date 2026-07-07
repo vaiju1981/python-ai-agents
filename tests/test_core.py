@@ -71,7 +71,9 @@ def test_response_stop_reason_classification() -> None:
     assert AgentResponse.completed("ok").is_completed
     assert AgentResponse.completed("ok").reason == StopReason.COMPLETED
     assert AgentResponse.stopped("later", "deadline_exceeded").retryable
-    assert AgentResponse.stopped("later", "deadline_exceeded").reason.category == StopCategory.TIMEOUT
+    assert (
+        AgentResponse.stopped("later", "deadline_exceeded").reason.category == StopCategory.TIMEOUT
+    )
     assert AgentResponse.blocked_response("blocked", "policy").reason == StopReason.BLOCKED
     assert not AgentResponse.stopped("too much", "budget_exceeded").retryable
 
@@ -80,11 +82,14 @@ def test_govern_honors_expired_deadline() -> None:
     async def run() -> None:
         request = AgentRequest.ephemeral("hello")
         expired = datetime.now(timezone.utc) - timedelta(seconds=1)
-        request = AgentRequest(request.input, request.context.__class__(
-            session_id=request.context.session_id,
-            trace_id=request.context.trace_id,
-            deadline=expired,
-        ))
+        request = AgentRequest(
+            request.input,
+            request.context.__class__(
+                session_id=request.context.session_id,
+                trace_id=request.context.trace_id,
+                deadline=expired,
+            ),
+        )
 
         response = await Trust.govern(EchoAgent()).run(request)
 

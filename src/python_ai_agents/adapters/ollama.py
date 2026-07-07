@@ -12,7 +12,6 @@ import anyio
 from python_ai_agents.core import AgentRequest, AgentResponse
 from python_ai_agents.core.model import Message, ModelRequest, ModelResponse, Role, ToolCall, Usage
 
-
 DEFAULT_OLLAMA_TEST_MODELS = (
     "hf.co/RefinedNeuro/RefinedToolCallV5-3b:Q8_0",
     "ornith:latest",
@@ -24,8 +23,7 @@ class OllamaError(RuntimeError):
 
 
 class OllamaTransport(Protocol):
-    def get_json(self, base_url: str, path: str, timeout: float) -> dict[str, Any]:
-        ...
+    def get_json(self, base_url: str, path: str, timeout: float) -> dict[str, Any]: ...
 
     def post_json(
         self,
@@ -33,8 +31,7 @@ class OllamaTransport(Protocol):
         path: str,
         payload: dict[str, Any],
         timeout: float,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
 
 class OllamaHttpTransport:
@@ -65,7 +62,8 @@ class OllamaHttpTransport:
     def _open_json(self, http_request: request.Request, timeout: float) -> dict[str, Any]:
         try:
             with request.urlopen(http_request, timeout=timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
+                payload: dict[str, Any] = json.loads(response.read().decode("utf-8"))
+                return payload
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise OllamaError(f"Ollama HTTP {exc.code}: {detail}") from exc
@@ -205,7 +203,7 @@ def _to_ollama_message(message: Message) -> dict[str, Any]:
     return value
 
 
-def _to_ollama_tool(spec) -> dict[str, Any]:
+def _to_ollama_tool(spec: Any) -> dict[str, Any]:
     return {
         "type": "function",
         "function": {
@@ -231,7 +229,9 @@ def _to_tool_call(value: Any) -> ToolCall:
     if not isinstance(arguments, dict):
         raise OllamaError("Ollama tool call arguments were not an object")
     call_id = value.get("id")
-    return ToolCall(name=name, arguments=arguments, id=call_id if isinstance(call_id, str) else str(uuid4()))
+    return ToolCall(
+        name=name, arguments=arguments, id=call_id if isinstance(call_id, str) else str(uuid4())
+    )
 
 
 def _optional_int(value: Any) -> int | None:

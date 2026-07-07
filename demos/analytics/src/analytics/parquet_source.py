@@ -43,9 +43,7 @@ class ParquetSource(DataSource):
         for name in self._table_names:
             schema = self._conn.execute(f"DESCRIBE {sql_quote(name)}").fetchall()
             cols = [ColumnSchema(name=row[0], physical_type=row[1]) for row in schema]
-            row_count = self._conn.execute(
-                f"SELECT COUNT(*) FROM {sql_quote(name)}"
-            ).fetchone()[0]
+            row_count = self._conn.execute(f"SELECT COUNT(*) FROM {sql_quote(name)}").fetchone()[0]
             result.append(TableSchema(name=name, rows=row_count, columns=tuple(cols)))
         return result
 
@@ -75,6 +73,7 @@ class ParquetSource(DataSource):
 
 def _sanitize(name: str) -> str:
     import re
+
     sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", name)
     if sanitized and sanitized[0].isdigit():
         sanitized = "t_" + sanitized

@@ -14,12 +14,16 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from python_ai_agents import RequestContext, extract_structured
-from python_ai_agents.core.model import ModelPort
-
-from demos.analytics.src.analytics.data_source import ColumnRole, ColumnSchema, DataSource, TableSchema
+from demos.analytics.src.analytics.data_source import (
+    ColumnRole,
+    ColumnSchema,
+    DataSource,
+    TableSchema,
+)
 from demos.analytics.src.analytics.profiler import DatasetProfile, profile_dataset
 from demos.analytics.src.analytics.semantic_model import SemanticModel
+from python_ai_agents import RequestContext, extract_structured
+from python_ai_agents.core.model import ModelPort
 
 __all__ = [
     "ColumnSemanticHint",
@@ -96,20 +100,16 @@ def _schema_prompt(profile: DatasetProfile, max_columns: int) -> str:
         "allowedRoles": [role.value for role in ColumnRole],
         "guidance": [
             "Use identifier only for true entity keys, foreign keys, codes, UUIDs, or IDs.",
-            "Use measure_additive for amounts, counts, balances, quantities, revenue, cost, and numeric facts that can be summed.",
-            "Use measure_ratio for rates, percentages, proportions, scores bounded to 0-1 or 0-100, and averages.",
+            "Use measure_additive for amounts, counts, balances, quantities, "
+            "revenue, cost, and numeric facts that can be summed.",
+            "Use measure_ratio for rates, percentages, proportions, "
+            "scores bounded to 0-1 or 0-100, and averages.",
             "Use date or timestamp for temporal columns.",
             "Use dimension for categorical grouping columns.",
             "Use text for free-form natural language fields.",
         ],
-        "tables": [
-            {"name": table.name, "rows": table.rows}
-            for table in profile.tables
-        ],
-        "columns": [
-            _column_payload(profile, column)
-            for column in profile.columns[:max_columns]
-        ],
+        "tables": [{"name": table.name, "rows": table.rows} for table in profile.tables],
+        "columns": [_column_payload(profile, column) for column in profile.columns[:max_columns]],
         "relationships": [
             {
                 "from": f"{rel.from_table}.{','.join(rel.from_columns)}",
@@ -122,7 +122,8 @@ def _schema_prompt(profile: DatasetProfile, max_columns: int) -> str:
     }
     return (
         "Refine the semantic role for each column where the deterministic role looks wrong. "
-        "Return hints for every column you are confident about, using the exact table and column names.\n\n"
+        "Return hints for every column you are confident about, "
+        "using the exact table and column names.\n\n"
         f"Profile:\n{json.dumps(payload, default=str, indent=2)}"
     )
 
@@ -152,11 +153,7 @@ def _column_payload(profile: DatasetProfile, column) -> dict[str, Any]:
 
 
 def _apply_hints(profile: DatasetProfile, hints: SchemaHints) -> DatasetProfile:
-    known_refs = {
-        (table.name, column.name)
-        for table in profile.tables
-        for column in table.columns
-    }
+    known_refs = {(table.name, column.name) for table in profile.tables for column in table.columns}
     role_overrides: dict[tuple[str, str], ColumnRole] = {}
     for hint in hints.columns:
         key = (hint.table, hint.column)

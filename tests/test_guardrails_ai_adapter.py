@@ -12,9 +12,7 @@ import pytest
 
 guardrails_available = importlib.util.find_spec("guardrails") is not None
 
-pytestmark = pytest.mark.skipif(
-    not guardrails_available, reason="guardrails-ai not installed"
-)
+pytestmark = pytest.mark.skipif(not guardrails_available, reason="guardrails-ai not installed")
 
 
 class FakeGuard:
@@ -79,9 +77,7 @@ def test_guardrails_ai_stage_filter() -> None:
 
     async def run() -> None:
         guard = FakeGuard(raises=ValueError("should not be called"))
-        guardrail = GuardrailsAiGuardrail(
-            guard=guard, stage=GuardrailStage.INPUT
-        )
+        guardrail = GuardrailsAiGuardrail(guard=guard, stage=GuardrailStage.INPUT)
 
         # Should skip on OUTPUT stage — guard.validate never called
         decision = await guardrail.check(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from datetime import timedelta
 
 import anyio
@@ -10,7 +9,6 @@ import pytest
 
 from python_ai_agents import (
     AgentRequest,
-    AgentResponse,
     DefaultAgent,
     ModelRequest,
     ModelResponse,
@@ -18,7 +16,6 @@ from python_ai_agents import (
     RecordingObserver,
     ReplayModelPort,
     ResilientModelPort,
-    Usage,
 )
 
 
@@ -40,9 +37,7 @@ class ScriptedModel:
 def test_resilient_model_port_retries_on_transient_failure() -> None:
     async def run() -> None:
         model = ScriptedModel(fail_times=2)
-        resilient = ResilientModelPort(
-            delegate=model, max_attempts=3, backoff_ms=0
-        )
+        resilient = ResilientModelPort(delegate=model, max_attempts=3, backoff_ms=0)
         response = await resilient.chat(ModelRequest(messages=()))
         assert response.text == "ok"
         assert model.calls == 3
@@ -52,18 +47,14 @@ def test_resilient_model_port_retries_on_transient_failure() -> None:
 
 def test_resilient_model_port_fails_fast_on_non_retryable() -> None:
     async def run() -> None:
-        model = ScriptedModel(fail_times=1)
-        resilient = ResilientModelPort(
-            delegate=model, max_attempts=3, backoff_ms=0,
-            retryable=lambda e: not isinstance(e, ValueError),
-        )
-
         class NonRetryableModel:
             async def chat(self, request: ModelRequest) -> ModelResponse:
                 raise ValueError("auth error")
 
         resilient2 = ResilientModelPort(
-            delegate=NonRetryableModel(), max_attempts=3, backoff_ms=0,
+            delegate=NonRetryableModel(),
+            max_attempts=3,
+            backoff_ms=0,
             retryable=lambda e: not isinstance(e, ValueError),
         )
         with pytest.raises(ValueError):
@@ -128,6 +119,7 @@ def test_observing_model_port_isolates_observer_failures() -> None:
         class FailingObserver:
             async def on_model_call(self, request: ModelRequest) -> None:
                 raise RuntimeError("observer failed")
+
             async def on_model_response(self, response: ModelResponse, latency: timedelta) -> None:
                 raise RuntimeError("observer failed")
 

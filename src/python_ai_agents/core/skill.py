@@ -11,12 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from python_ai_agents.core.agent import Agent, AgentRequest, AgentResponse
+from python_ai_agents.core.agent import AgentRequest, AgentResponse
 from python_ai_agents.core.default_agent import DefaultAgent
 from python_ai_agents.core.guardrail import Guardrail
 from python_ai_agents.core.model import ModelPort
 from python_ai_agents.core.observe import AgentObserver
-from python_ai_agents.core.tool import Tool, ToolApprover, DenyEffectfulTools
+from python_ai_agents.core.tool import DenyEffectfulTools, Tool, ToolApprover
 from python_ai_agents.core.trust import Trust
 
 __all__ = [
@@ -47,20 +47,16 @@ class Skill(Protocol):
     """
 
     @property
-    def name(self) -> str:
-        ...
+    def name(self) -> str: ...
 
     @property
-    def description(self) -> str:
-        ...
+    def description(self) -> str: ...
 
     @property
-    def instructions(self) -> str:
-        ...
+    def instructions(self) -> str: ...
 
     @property
-    def tools(self) -> tuple[Tool, ...]:
-        ...
+    def tools(self) -> tuple[Tool, ...]: ...
 
 
 class SkillCatalog:
@@ -85,8 +81,7 @@ class SkillCatalog:
 class SkillSelector(Protocol):
     """Selects relevant skills for a given input."""
 
-    def select(self, catalog: SkillCatalog, input_text: str) -> list[Skill]:
-        ...
+    def select(self, catalog: SkillCatalog, input_text: str) -> list[Skill]: ...
 
 
 @dataclass(frozen=True, slots=True)

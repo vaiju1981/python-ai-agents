@@ -17,6 +17,7 @@ def classify_role(p: ColumnProfile) -> ColumnRole:
     if "id-like" in p.signals or "leading-zeros" in p.signals:
         return ColumnRole.IDENTIFIER
     from demos.analytics.src.analytics.profiler import is_numeric
+
     if is_numeric(p.physical_type):
         return ColumnRole.MEASURE_RATIO if _is_ratio(p) else ColumnRole.MEASURE_ADDITIVE
     if p.distinct <= 50 or (p.rows > 0 and p.distinct / p.rows < 0.5):

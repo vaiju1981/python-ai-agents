@@ -38,8 +38,7 @@ class AuditEvent:
 
 
 class AuditSink(Protocol):
-    async def record(self, event: AuditEvent) -> None:
-        ...
+    async def record(self, event: AuditEvent) -> None: ...
 
 
 class NullAuditSink:

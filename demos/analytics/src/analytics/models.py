@@ -15,7 +15,8 @@ from python_ai_agents.core.model import ModelPort
 def from_env() -> ModelPort:
     """Select a model from environment variables.
 
-    Required: ``ANALYTICS_MODEL_PROVIDER`` (e.g. "ollama") and ``ANALYTICS_MODEL`` (e.g. "ornith:latest").
+    Required: ``ANALYTICS_MODEL_PROVIDER`` (e.g. "ollama") and
+    ``ANALYTICS_MODEL`` (e.g. "ornith:latest").
     Optional: ``OLLAMA_BASE_URL`` (default ``http://localhost:11434``).
     """
     provider = os.environ.get("ANALYTICS_MODEL_PROVIDER", "")

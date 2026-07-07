@@ -88,7 +88,9 @@ class SemanticModel:
                 elif col.role in (ColumnRole.DATE, ColumnRole.TIMESTAMP):
                     dimensions.append(Dimension(table=table.name, column=col.name))
                     encoding = _encoding_of(col, stats.get(f"{table.name}.{col.name}"))
-                    time_columns.append(TimeColumn(table=table.name, column=col.name, encoding=encoding))
+                    time_columns.append(
+                        TimeColumn(table=table.name, column=col.name, encoding=encoding)
+                    )
                 elif col.role in (ColumnRole.DIMENSION, ColumnRole.BOOLEAN):
                     dimensions.append(Dimension(table=table.name, column=col.name))
                 elif col.role == ColumnRole.IDENTIFIER:
@@ -102,10 +104,12 @@ class SemanticModel:
             relationships=profile.relationships,
         )
 
-    def catalog_json(self, source_tables: list[Any] | None = None,
-                     catalog: Any | None = None) -> str:
+    def catalog_json(
+        self, source_tables: list[Any] | None = None, catalog: Any | None = None
+    ) -> str:
         """Compact JSON schema for the agent's system prompt."""
         import json
+
         return json.dumps(self._catalog_dict(source_tables, catalog), separators=(",", ":"))
 
     def _catalog_dict(self, source_tables: list[Any] | None, catalog: Any | None) -> dict:
@@ -126,12 +130,23 @@ class SemanticModel:
                 tables_out.append({"name": t.name, "description": t_desc or "", "columns": cols})
 
         return {
-            "metrics": [desc_ref(m.ref, catalog.description_for_column(m.table, m.column) if catalog else None) for m in self.metrics],
-            "dimensions": [desc_ref(d.ref, catalog.description_for_column(d.table, d.column) if catalog else None) for d in self.dimensions],
+            "metrics": [
+                desc_ref(
+                    m.ref, catalog.description_for_column(m.table, m.column) if catalog else None
+                )
+                for m in self.metrics
+            ],
+            "dimensions": [
+                desc_ref(
+                    d.ref, catalog.description_for_column(d.table, d.column) if catalog else None
+                )
+                for d in self.dimensions
+            ],
             "timeColumns": [f"{t.ref} ({t.encoding.value})" for t in self.time_columns],
             "tables": tables_out,
             "relationships": [
-                f"{r.from_table}.{','.join(r.from_columns)} ~ {r.to_table}.{','.join(r.to_columns)} ({r.cardinality})"
+                f"{r.from_table}.{','.join(r.from_columns)} ~ "
+                f"{r.to_table}.{','.join(r.to_columns)} ({r.cardinality})"
                 for r in self.relationships
             ],
         }
@@ -139,7 +154,13 @@ class SemanticModel:
 
 def _encoding_of(col: Any, stats: ColumnProfile | None) -> TimeEncoding:
     if col.role == ColumnRole.TIMESTAMP:
-        if stats and stats.min is not None and stats.min >= 1e9 and stats.max is not None and stats.max <= 5e12:
+        if (
+            stats
+            and stats.min is not None
+            and stats.min >= 1e9
+            and stats.max is not None
+            and stats.max <= 5e12
+        ):
             if stats.max > 1e10:
                 return TimeEncoding.EPOCH_MILLIS
             return TimeEncoding.EPOCH_SECONDS

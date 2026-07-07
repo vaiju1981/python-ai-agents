@@ -42,20 +42,20 @@ class Catalog:
         """Apply include/exclude overrides to discovered relationships."""
         out: list[Relationship] = []
         for r in discovered:
-            excluded = any(
-                _rel_match(x, r) for x in self.exclude
-            )
+            excluded = any(_rel_match(x, r) for x in self.exclude)
             if not excluded:
                 out.append(r)
         for inc in self.include:
-            out.append(Relationship(
-                from_table=inc["fromTable"],
-                from_columns=tuple(inc.get("fromColumns", [])),
-                to_table=inc["toTable"],
-                to_columns=tuple(inc.get("toColumns", [])),
-                cardinality=inc.get("cardinality", "many_to_one"),
-                coverage=1.0,
-            ))
+            out.append(
+                Relationship(
+                    from_table=inc["fromTable"],
+                    from_columns=tuple(inc.get("fromColumns", [])),
+                    to_table=inc["toTable"],
+                    to_columns=tuple(inc.get("toColumns", [])),
+                    cardinality=inc.get("cardinality", "many_to_one"),
+                    coverage=1.0,
+                )
+            )
         return out
 
     def description_for_table(self, name: str) -> str:
@@ -70,7 +70,10 @@ class Catalog:
             return
         data = {
             "relationships": {"include": self.include, "exclude": self.exclude},
-            "descriptions": {"tables": self.table_descriptions, "columns": self.column_descriptions},
+            "descriptions": {
+                "tables": self.table_descriptions,
+                "columns": self.column_descriptions,
+            },
         }
         self.file.write_text(json.dumps(data, indent=2))
 

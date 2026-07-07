@@ -1,5 +1,7 @@
 """Optional substrate adapters."""
 
+from typing import Any
+
 from python_ai_agents.adapters.ollama import (
     DEFAULT_OLLAMA_TEST_MODELS,
     OllamaAgent,
@@ -14,7 +16,6 @@ __all__ = [
     "GuardrailsAiGuardrail",
     "McpToolAdapter",
     "OtelAgentObserver",
-    "RemoteA2aAgent",
     "JsonSchemaToolArgumentValidator",
     "LangGraphAgent",
     "OllamaAgent",
@@ -29,7 +30,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     if name == "JsonSchemaToolArgumentValidator":
         from python_ai_agents.adapters.jsonschema_tools import JsonSchemaToolArgumentValidator
 
@@ -64,8 +65,4 @@ def __getattr__(name: str):
         from python_ai_agents.adapters.otel import OtelAgentObserver
 
         return OtelAgentObserver
-    if name == "RemoteA2aAgent":
-        from python_ai_agents.adapters.a2a import RemoteA2aAgent
-
-        return RemoteA2aAgent
     raise AttributeError(name)

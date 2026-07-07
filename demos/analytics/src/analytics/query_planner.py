@@ -154,7 +154,12 @@ def _prune(parent_edge: dict[str, JoinEdge], requested: set[str]) -> list[JoinEd
         while t in parent_edge:
             keep.add(t)
             t = parent_edge[t].parent
-    return [parent_edge[t] for t in sorted(keep, key=lambda x: list(parent_edge.keys()).index(x) if x in parent_edge else 0)]
+    return [
+        parent_edge[t]
+        for t in sorted(
+            keep, key=lambda x: list(parent_edge.keys()).index(x) if x in parent_edge else 0
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -204,9 +209,7 @@ def _build_where(model: SemanticModel, spec: QuerySpec) -> str:
                 f"{ts_expr} >= current_timestamp - INTERVAL '{spec.last_days + offset} days'"
             )
             if offset > 0:
-                clauses.append(
-                    f"{ts_expr} < current_timestamp - INTERVAL '{offset} days'"
-                )
+                clauses.append(f"{ts_expr} < current_timestamp - INTERVAL '{offset} days'")
 
     return f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
@@ -230,7 +233,9 @@ def _group_by_query(
             select_parts.append(sql_qcol(d.table, d.column))
     for m in metrics:
         if m.table == table:
-            select_parts.append(f"{m.aggregation.upper()}({sql_qcol(m.table, m.column)}) AS {m.column}")
+            select_parts.append(
+                f"{m.aggregation.upper()}({sql_qcol(m.table, m.column)}) AS {m.column}"
+            )
 
     group_parts = [sql_qcol(d.table, d.column) for d in dimensions if d.table == table]
 
@@ -288,7 +293,9 @@ def _fact_chain_join(
     )
 
 
-def _apply_order_limit(sql: str, metrics: list[Metric], dimensions: list[Dimension], spec: QuerySpec) -> str:
+def _apply_order_limit(
+    sql: str, metrics: list[Metric], dimensions: list[Dimension], spec: QuerySpec
+) -> str:
     result = sql
     # Order by: use the metric alias (column name), not the full table.column ref
     if spec.order_by:

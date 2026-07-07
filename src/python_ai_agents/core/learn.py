@@ -7,16 +7,17 @@ answers, self-critiques, and on a poor answer records the lesson and retries
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from typing import Protocol, cast
 
 from pydantic import BaseModel
 
 from python_ai_agents.core.agent import Agent, AgentRequest, AgentResponse
-from python_ai_agents.core.episodic import Episode, EpisodicStore, InMemoryEpisodicStore
-from python_ai_agents.core.model import Message, ModelPort, ModelRequest
-from python_ai_agents.core.structured import extract_structured
 from python_ai_agents.core.context import RequestContext
+from python_ai_agents.core.episodic import Episode, EpisodicStore, InMemoryEpisodicStore
+from python_ai_agents.core.model import ModelPort
+from python_ai_agents.core.structured import extract_structured
 
 __all__ = [
     "LlmReflector",
@@ -45,8 +46,7 @@ class Reflection:
 class Reflector(Protocol):
     """Judges whether an answer addresses a task, producing a lesson when it doesn't."""
 
-    async def reflect(self, task: str, answer: str) -> Reflection:
-        ...
+    async def reflect(self, task: str, answer: str) -> Reflection: ...
 
 
 class _VerdictSchema(BaseModel):
@@ -71,9 +71,10 @@ class LlmReflector:
         )
         if result.value is None:
             return Reflection.ok()
-        if result.value.satisfactory:
+        verdict = cast(_VerdictSchema, result.value)
+        if verdict.satisfactory:
             return Reflection.ok()
-        return Reflection.issue(result.value.lesson)
+        return Reflection.issue(verdict.lesson)
 
 
 @dataclass(slots=True)
@@ -98,7 +99,7 @@ class ReflectiveAgent:
         lessons = _format_lessons(past)
 
         last: AgentResponse | None = None
-        for attempt in range(1, self.max_attempts + 1):
+        for _attempt in range(1, self.max_attempts + 1):
             inp = task
             if lessons:
                 inp = f"{task}\n\nLessons to apply (from earlier attempts):\n{lessons}"
@@ -111,10 +112,17 @@ class ReflectiveAgent:
                 return last
 
             await self.memory.record(
-                Episode(tenant=tenant, task=task, outcome=last.output, success=False,
-                        lesson=reflection.lesson)
+                Episode(
+                    tenant=tenant,
+                    task=task,
+                    outcome=last.output,
+                    success=False,
+                    lesson=reflection.lesson,
+                )
             )
-            lessons = (lessons + f"- {reflection.lesson}\n") if lessons else f"- {reflection.lesson}\n"
+            lessons = (
+                (lessons + f"- {reflection.lesson}\n") if lessons else f"- {reflection.lesson}\n"
+            )
 
         return last  # type: ignore[return-value]
 

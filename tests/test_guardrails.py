@@ -77,9 +77,7 @@ def test_keyword_blocklist_case_sensitive() -> None:
 
 def test_keyword_blocklist_stage_filter() -> None:
     async def run() -> None:
-        guardrail = KeywordBlocklistGuardrail(
-            keywords={"blocked"}, stage=GuardrailStage.OUTPUT
-        )
+        guardrail = KeywordBlocklistGuardrail(keywords={"blocked"}, stage=GuardrailStage.OUTPUT)
         # Should not block on INPUT stage
         decision = await guardrail.check(
             GuardrailStage.INPUT, "blocked text", RequestContext.ephemeral()

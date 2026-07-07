@@ -22,8 +22,12 @@ ANALYTICS_MODEL_PROVIDER=ollama ANALYTICS_MODEL=ornith:latest \
 - **Insights tab** — on load, deterministic insights per metric: overall total,
   trend direction over time, top breakdowns, and data-quality flags.
 - **Chat** — ask in plain English; the agent answers with governed read-only
-  tools (`run_query`, `trend`, `compare`, `summarize`, `correlate`, `outliers`,
-  `regression`, `run_sql`) and renders a chart when the result shape fits.
+  tools and renders a chart when the shape fits.
+  - *Descriptive:* `run_query`, `trend`, `compare`, `summarize`, `correlate`,
+    `outliers`, `regression`, `run_sql`.
+  - *Predictive & causal:* `build_model`, `forecast`, `ab_test`, `causal_effect`,
+    `uplift`, `cluster`, `anomaly_detection` — each reports its method and sample
+    size; causal/uplift carry an explicit "not proof of causation" caveat.
 - **SQL tab** — a read-only DuckDB escape hatch, with an automatic chart.
 - **Optional** (off by default) — an LLM pass to relabel column roles.
 
@@ -38,4 +42,4 @@ Demo-only — never imported by `python_ai_agents.core`:
 - **Pandas** — dataframe glue for rendering
 - **Plotly** — charts
 - **Streamlit** — UI
-- **scikit-learn** — the linear-regression tool
+- **scikit-learn / scipy / statsmodels** — modeling, statistical tests, forecasting
