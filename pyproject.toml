@@ -62,6 +62,8 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 markers = [
   "ollama: live Ollama integration tests",
+  "integration: integration tests that may use local services or larger local fixtures",
+  "redrock: analytics tests using local REDROCK CSV exports",
 ]
 
 [tool.mypy]
