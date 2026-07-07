@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from demos.analytics.src.analytics.data_source import DataSource
+from demos.analytics.src.analytics.models_tools import ModelsToolset
 from demos.analytics.src.analytics.profiler import profile_dataset
 from demos.analytics.src.analytics.semantic_model import SemanticModel
 from demos.analytics.src.analytics.toolset import AnalyticsToolset
@@ -30,10 +31,12 @@ def create_agent(
         semantic = SemanticModel.from_profile(profile)
 
     tools = AnalyticsToolset(source, semantic, catalog)
+    models = ModelsToolset(source, semantic)
     system_prompt = (
         "You are a careful data analyst over this dataset. Use these EXACT refs.\n"
         f"SCHEMA: {tools.catalog_json()}\n"
-        "Answer each question by calling ONE tool, then replying in plain text with the numbers:\n"
+        "Answer each question by calling ONE tool, then replying in plain text with the numbers.\n"
+        "Descriptive tools:\n"
         "- run_query: metrics grouped by dimensions; 'last N days' -> lastDays + timeColumn; "
         "'top N' -> limit; simple filters {column,op,value}.\n"
         "- compare: period-over-period comparison; requires metrics, timeColumn, lastDays.\n"
@@ -43,13 +46,21 @@ def create_agent(
         "- outliers(metric): unusual values by z-score.\n"
         "- regression(target): which measures linearly predict a target.\n"
         "- run_sql: read-only DuckDB SQL for custom filters, time buckets, window functions.\n"
-        "After the tool returns, STOP calling tools and answer with the numbers. "
-        "Never present unfiltered numbers as if filtered; do not claim causation from correlation."
+        "Predictive & causal tools (use when the question needs modeling or an experiment):\n"
+        "- build_model(target, predictors?): train a model, rank feature importance.\n"
+        "- forecast(metric, timeColumn, horizon?): project a metric forward.\n"
+        "- ab_test(metric, groupColumn, groupA, groupB): compare two groups (t-test).\n"
+        "- causal_effect(target, treatment, controls?): effect adjusting for confounders.\n"
+        "- uplift(target, treatment, predictors?): who benefits most from a treatment.\n"
+        "- cluster(columns, k?): segment rows. anomaly_detection(columns): flag outliers.\n"
+        "After the tool returns, STOP calling tools and answer with the numbers. Never present "
+        "unfiltered numbers as if filtered; do not claim causation from correlation — cite the "
+        "tool's caveat when reporting causal_effect or uplift."
     )
 
     return DefaultAgent(
         model=model,
-        tools=tools.all_tools(),
+        tools=tools.all_tools() + models.all_tools(),
         system_prompt=system_prompt,
         max_steps=8,
         tool_timeout_seconds=120.0,
