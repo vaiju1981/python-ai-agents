@@ -18,11 +18,13 @@ import json
 import time
 from typing import Any
 
-from demos.analytics.src.analytics.data_source import DataSource, sql_qcol, sql_quote
+from demos.analytics.src.analytics.data_source import DataSource, sql_literal, sql_qcol, sql_quote
 from demos.analytics.src.analytics.model_store import ModelRecord, ModelStore, model_key
+from demos.analytics.src.analytics.query_planner import OPERATORS
 from demos.analytics.src.analytics.semantic_model import SemanticModel
 from demos.analytics.src.analytics.toolset import (
     MAX_RESULT_CHARS,
+    _filter_schema,
     _frame,
     _make_tool,
     _object_schema,
@@ -31,6 +33,9 @@ from demos.analytics.src.analytics.toolset import (
 from python_ai_agents.core.tool import Tool, ToolResult
 
 _MIN_ROWS = 20
+# Drift = standardized mean shift of a feature vs its training distribution.
+# ponytail: mean-shift heuristic; upgrade to PSI/KS tests if this proves too coarse.
+_DRIFT_THRESHOLD = 0.5
 
 
 class ModelsToolset:
@@ -60,6 +65,7 @@ class ModelsToolset:
     def all_tools(self) -> list[Tool]:
         return [
             self.build_model(),
+            self.predict(),
             self.forecast(),
             self.ab_test(),
             self.causal_effect(),
@@ -68,56 +74,70 @@ class ModelsToolset:
             self.anomaly_detection(),
         ]
 
-    # -- build_model ----------------------------------------------------------
+    # -- build_model / predict (train once, serve many) ------------------------
+
+    def _prepare_model_spec(
+        self, args: dict[str, Any]
+    ) -> tuple[str, str, list[str], bool, str, Any]:
+        """Resolve target/predictors, load training data, and compute the model key."""
+        import pandas as pd
+
+        t_table, t_col = self._resolve(args["target"])
+        predictors = args.get("predictors") or self._numeric_columns(t_table, exclude=t_col)
+        pcols = [c for p in predictors for (pt, c) in [self._resolve(p)] if pt == t_table]
+        if not pcols:
+            raise ValueError("no predictors in the target's table")
+
+        df = self._frame(t_table, [t_col, *dict.fromkeys(pcols)])
+        x = df[pcols].apply(pd.to_numeric, errors="coerce").dropna(axis=1, how="all")
+        data = pd.concat([df[t_col], x], axis=1).dropna()
+        if len(data) < _MIN_ROWS:
+            raise ValueError(f"need {_MIN_ROWS}+ rows to model (got {len(data)})")
+
+        task = args.get("task", "auto")
+        is_clf = task == "classification" or (
+            task == "auto" and self._looks_categorical(data[t_col])
+        )
+        feature_cols = list(x.columns)
+        algo = "random_forest_classifier" if is_clf else "random_forest_regressor"
+        key = model_key(
+            dataset_sig=self.dataset_sig,
+            task="classification" if is_clf else "regression",
+            target=t_col,
+            predictors=feature_cols,
+            algorithm=algo,
+        )
+        return t_table, t_col, feature_cols, is_clf, key, data
+
+    def _train_or_load(
+        self, args: dict[str, Any]
+    ) -> tuple[str, str, list[str], Any, dict[str, Any], bool, float]:
+        """Train-once cache: reuse a fresh stored model unless the caller forces a retrain."""
+        t_table, t_col, feature_cols, is_clf, key, data = self._prepare_model_spec(args)
+        if self.store is not None and not args.get("retrain", False):
+            cached = self.store.get(key, max_age=self.model_ttl)
+            if cached is not None:
+                return (
+                    t_table,
+                    t_col,
+                    feature_cols,
+                    cached.model,
+                    dict(cached.metadata),
+                    True,
+                    cached.trained_at,
+                )
+        result, fitted = self._fit(data[t_col], data[feature_cols], feature_cols, is_clf)
+        trained_at = time.time()
+        if self.store is not None:
+            self.store.put(
+                ModelRecord(key=key, model=fitted, metadata=result, trained_at=trained_at)
+            )
+        return t_table, t_col, feature_cols, fitted, result, False, trained_at
 
     def build_model(self) -> Tool:
         async def impl(args: dict[str, Any], ctx: Any) -> ToolResult:
-            import pandas as pd
-
-            target = args["target"]
-            t_table, t_col = self._resolve(target)
-            predictors = args.get("predictors") or self._numeric_columns(t_table, exclude=t_col)
-            pcols = [c for p in predictors for (pt, c) in [self._resolve(p)] if pt == t_table]
-            if not pcols:
-                return ToolResult.failed("no predictors in the target's table")
-
-            df = self._frame(t_table, [t_col, *dict.fromkeys(pcols)])
-            X = df[pcols].apply(pd.to_numeric, errors="coerce")
-            X = X.dropna(axis=1, how="all")
-            data = pd.concat([df[t_col], X], axis=1).dropna()
-            if len(data) < _MIN_ROWS:
-                return ToolResult.failed(f"need {_MIN_ROWS}+ rows to model (got {len(data)})")
-
-            task = args.get("task", "auto")
-            is_clf = task == "classification" or (
-                task == "auto" and self._looks_categorical(data[t_col])
-            )
-            feature_cols = list(X.columns)
-            algo = "random_forest_classifier" if is_clf else "random_forest_regressor"
-            key = model_key(
-                dataset_sig=self.dataset_sig,
-                task="classification" if is_clf else "regression",
-                target=t_col,
-                predictors=feature_cols,
-                algorithm=algo,
-            )
-
-            # Train-once cache: reuse a fresh model unless the caller forces a retrain.
-            if self.store is not None and not args.get("retrain", False):
-                cached = self.store.get(key, max_age=self.model_ttl)
-                if cached is not None:
-                    return _ok(
-                        "build_model",
-                        {**cached.metadata, "cached": True, "trained_at": cached.trained_at},
-                    )
-
-            result, fitted = self._fit(data[t_col], data[feature_cols], feature_cols, is_clf)
-            trained_at = time.time()
-            if self.store is not None:
-                self.store.put(
-                    ModelRecord(key=key, model=fitted, metadata=result, trained_at=trained_at)
-                )
-            return _ok("build_model", {**result, "cached": False, "trained_at": trained_at})
+            _, _, _, _, meta, cached, trained_at = self._train_or_load(args)
+            return _ok("build_model", {**meta, "cached": cached, "trained_at": trained_at})
 
         return _make_tool(
             "build_model",
@@ -139,8 +159,78 @@ class ModelsToolset:
             ),
         )
 
+    def predict(self) -> Tool:
+        async def impl(args: dict[str, Any], ctx: Any) -> ToolResult:
+            import pandas as pd
+
+            # Serving: load the stored model for this spec (training once if absent),
+            # then score rows WITHOUT retraining — the train/serve split.
+            t_table, t_col, feature_cols, fitted, meta, cached, trained_at = self._train_or_load(
+                args
+            )
+            filters = list(args.get("filters") or [])
+            score_df = self._frame(t_table, feature_cols, filters=filters)
+            score_df = score_df.apply(pd.to_numeric, errors="coerce").dropna()
+            if score_df.empty:
+                return ToolResult.failed("no rows to score after filters")
+
+            preds = fitted.predict(score_df[feature_cols].astype(float).values)
+            if meta.get("task") == "classification":
+                classes = list(meta.get("classes") or [])
+                labels = [classes[int(p)] if 0 <= int(p) < len(classes) else str(p) for p in preds]
+                counts: dict[str, int] = {}
+                for label in labels:
+                    counts[label] = counts.get(label, 0) + 1
+                summary: dict[str, Any] = {"class_distribution": counts}
+            else:
+                summary = {
+                    "mean": round(float(preds.mean()), 4),
+                    "min": round(float(preds.min()), 4),
+                    "max": round(float(preds.max()), 4),
+                }
+
+            return _ok(
+                "predict",
+                {
+                    "target": t_col,
+                    "task": meta.get("task"),
+                    "n_scored": int(len(score_df)),
+                    "prediction": summary,
+                    "model_cached": cached,
+                    "trained_at": trained_at,
+                    "drift": _drift_check(meta.get("train_stats") or {}, score_df, feature_cols),
+                    "method": "serves the stored model; build_model(retrain=true) refreshes it",
+                },
+            )
+
+        return _make_tool(
+            "predict",
+            "Score rows with the stored trained model (trains once if missing) — no retraining "
+            "per call. Reports predictions and drift vs the training data. "
+            "Args: target, predictors?, task?, filters?.",
+            _guarded("predict", impl),
+            _object_schema(
+                {
+                    "target": {"type": "string", "description": "Column the model predicts."},
+                    "predictors": _string_array("Numeric predictors (default: measures)."),
+                    "task": {
+                        "type": "string",
+                        "enum": ["auto", "classification", "regression"],
+                        "default": "auto",
+                    },
+                    "filters": _filter_schema(),
+                },
+                required=("target",),
+            ),
+        )
+
     def _fit(self, y: Any, x: Any, pcols: list[str], is_clf: bool) -> tuple[dict[str, Any], Any]:
         xv = x.astype(float).values
+        # Per-feature training stats travel with the model so `predict` can flag drift.
+        train_stats = {
+            c: {"mean": round(float(x[c].mean()), 4), "std": round(float(x[c].std(ddof=0)), 4)}
+            for c in pcols
+        }
         if is_clf:
             from sklearn.ensemble import RandomForestClassifier
 
@@ -153,8 +243,10 @@ class ModelsToolset:
                 "task": "classification",
                 "n_rows": int(len(y)),
                 "n_classes": int(n_classes),
+                "classes": [str(u) for u in uniques],
                 "cv_accuracy": score,
                 "feature_importance": _importances(pcols, model.feature_importances_),
+                "train_stats": train_stats,
                 "method": "RandomForestClassifier, 5-fold CV accuracy on historical data",
             }, model
         from sklearn.ensemble import RandomForestRegressor
@@ -168,6 +260,7 @@ class ModelsToolset:
             "n_rows": int(len(y)),
             "cv_r2": score,
             "feature_importance": _importances(pcols, model.feature_importances_),
+            "train_stats": train_stats,
             "method": "RandomForestRegressor, 5-fold CV R^2 on historical data",
         }, model
 
@@ -534,13 +627,27 @@ class ModelsToolset:
                 return tc
         return None
 
-    def _frame(self, table: str, columns: list[str], max_rows: int | None = None) -> Any:
+    def _frame(
+        self,
+        table: str,
+        columns: list[str],
+        max_rows: int | None = None,
+        filters: list[dict[str, Any]] | None = None,
+    ) -> Any:
         import pandas as pd
 
         cap = max_rows if max_rows is not None else self.max_train_rows
         select = ", ".join(sql_qcol(table, c) for c in columns)
-        where = " AND ".join(f"{sql_qcol(table, c)} IS NOT NULL" for c in columns)
-        sql = f"SELECT {select} FROM {sql_quote(table)} WHERE {where}"
+        parts = [f"{sql_qcol(table, c)} IS NOT NULL" for c in columns]
+        for f in filters or []:
+            f_table, f_col = self._resolve(str(f["column"]))
+            if f_table != table:
+                raise ValueError(f"filter column '{f['column']}' is not in table '{table}'")
+            op = str(f["op"])
+            if op not in OPERATORS:
+                raise ValueError(f"unsupported filter op: {op}")
+            parts.append(f"{sql_qcol(table, f_col)} {op} '{sql_literal(str(f['value']))}'")
+        sql = f"SELECT {select} FROM {sql_quote(table)} WHERE {' AND '.join(parts)}"
         if cap:
             # User opted to cap training rows; reservoir-sample so it fits in memory.
             sql = f"SELECT * FROM ({sql}) USING SAMPLE {int(cap)} ROWS"
@@ -565,6 +672,35 @@ def _guarded(name: str, fn: Any) -> Any:
 
 def _ok(name: str, obj: dict[str, Any]) -> ToolResult:
     return ToolResult.ok(_frame(name, json.dumps(obj, default=str)[:MAX_RESULT_CHARS]))
+
+
+def _drift_check(train_stats: dict[str, Any], df: Any, feature_cols: list[str]) -> dict[str, Any]:
+    """Standardized mean shift of each scoring feature vs its training distribution."""
+    shifts: dict[str, float] = {}
+    for col in feature_cols:
+        stats = train_stats.get(col)
+        if not stats:
+            continue
+        std = float(stats.get("std") or 0.0) or 1.0
+        shifts[col] = round(abs(float(df[col].mean()) - float(stats["mean"])) / std, 3)
+    if not shifts:
+        return {"checked": False, "note": "no training statistics stored with this model"}
+    worst = max(shifts, key=lambda c: shifts[c])
+    detected = shifts[worst] > _DRIFT_THRESHOLD
+    result: dict[str, Any] = {
+        "checked": True,
+        "detected": detected,
+        "score": shifts[worst],
+        "threshold": _DRIFT_THRESHOLD,
+        "worst_feature": worst,
+        "feature_shift": shifts,
+    }
+    if detected:
+        result["recommendation"] = (
+            "scored rows' distribution shifted vs training data; "
+            "retrain via build_model(retrain=true)"
+        )
+    return result
 
 
 def _importances(names: list[str], values: Any) -> list[dict[str, Any]]:

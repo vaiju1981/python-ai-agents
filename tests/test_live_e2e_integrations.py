@@ -34,7 +34,7 @@ from python_ai_agents import (
     TokenBudget,
     Trust,
 )
-from python_ai_agents.adapters import OllamaModelPort
+from python_ai_agents.adapters import RECOMMENDED_SAMPLING, OllamaModelPort
 
 _langgraph_available = importlib.util.find_spec("langgraph") is not None
 
@@ -49,11 +49,11 @@ pytestmark = [
 
 async def _get_model() -> OllamaModelPort:
     """Return an OllamaModelPort for the first available model."""
-    model = OllamaModelPort("ornith:latest", options={"temperature": 0}, timeout=180)
+    model = OllamaModelPort("ornith:latest", options=dict(RECOMMENDED_SAMPLING), timeout=180)
     if not await model.has_model():
         # Try other models
         for name in ("gemma3:4b", "llama3.2:3b", "qwen2.5:3b", "phi3:3.8b"):
-            alt = OllamaModelPort(name, options={"temperature": 0}, timeout=180)
+            alt = OllamaModelPort(name, options=dict(RECOMMENDED_SAMPLING), timeout=180)
             if await alt.has_model():
                 return alt
         pytest.skip("No Ollama model available")

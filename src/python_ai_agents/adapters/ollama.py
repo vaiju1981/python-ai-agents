@@ -17,6 +17,15 @@ DEFAULT_OLLAMA_TEST_MODELS = (
     "ornith:latest",
 )
 
+# Vendor-recommended sampling for the local test models. Benchmarked 2026-07-07:
+# temperature 0 made the 9B model repeat tool calls until the agent's step budget
+# on open-ended prompts; these settings fixed that with no loss on exact answers.
+RECOMMENDED_SAMPLING: dict[str, float | int] = {
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 20,
+}
+
 
 class OllamaError(RuntimeError):
     """Raised when Ollama cannot complete a request."""

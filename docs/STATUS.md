@@ -33,9 +33,9 @@ same on every push/PR.
 
 - CSV → DuckDB import, deterministic profiling + semantic model + relationship
   discovery; built once per session (no per-message rebuild, no connection leak).
-- Descriptive tools (9) + **predictive/causal tools (7)**: `build_model`, `forecast`,
-  `ab_test`, `causal_effect`, `uplift`, `cluster`, `anomaly_detection` — correct
-  implementations, honest caveats, behavioral tests.
+- Descriptive tools (9) + **predictive/causal tools (8)**: `build_model`, `predict`,
+  `forecast`, `ab_test`, `causal_effect`, `uplift`, `cluster`, `anomaly_detection` —
+  correct implementations, honest caveats, behavioral tests.
 - Real Plotly charts (Insights, Chat, SQL); deterministic on-load insights.
 - Truthful copy and dependencies.
 
@@ -51,10 +51,13 @@ same on every push/PR.
   `EvalRunner` over the analytics agent, as a regression guard on answer quality.
 - **Season-aware forecast:** Holt-Winters with an additive seasonal component
   (auto-detected period), falling back to trend-only / linear.
-- **Model lifecycle (first cut):** `ModelStore` (InMemory/File) with train-once
-  caching keyed by dataset signature + task + target + predictors + algorithm;
-  retrain on data change, TTL, or explicit request. Full plan, incl. drift /
-  scheduled retrain / `predict` serving / MLflow adapter, in
+- **Model lifecycle:** `ModelStore` (InMemory/File) with train-once caching keyed
+  by dataset signature + task + target + predictors + algorithm; retrain on data
+  change, TTL, or explicit request. **`predict` serving** scores rows with the
+  stored model (optionally filtered) without retraining, and **flags drift**
+  (standardized mean shift vs training stats) with a retrain recommendation.
+  Scheduled retrain = any scheduler calling `build_model(retrain=true)`.
+  Deferred (no consumer yet): MLflow adapter, last-N rollback — see
   [MODEL_LIFECYCLE.md](MODEL_LIFECYCLE.md).
 - **Sampling defaults:** vendor-recommended (temp 1.0, top_p 0.95, top_k 20) —
   temperature 0 made the local model repeat tool calls into the step budget on

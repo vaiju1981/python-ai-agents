@@ -21,7 +21,11 @@ from demos.analytics.src.analytics.profiler import profile_dataset
 from demos.analytics.src.analytics.schema_builder import refine_profile_with_llm
 from demos.analytics.src.analytics.semantic_model import SemanticModel
 from demos.analytics.src.analytics.toolset import AnalyticsToolset
-from python_ai_agents.adapters import DEFAULT_OLLAMA_TEST_MODELS, OllamaModelPort
+from python_ai_agents.adapters import (
+    DEFAULT_OLLAMA_TEST_MODELS,
+    RECOMMENDED_SAMPLING,
+    OllamaModelPort,
+)
 
 DEFAULT_REDROCK_DATA_DIR = Path("/Users/vaijanath.rao/ga_cache/training_data")
 DEFAULT_SAMPLE_ROWS = 250
@@ -112,7 +116,7 @@ def test_redrock_csv_samples_profile_without_hardcoded_demo_schema(tmp_path) -> 
 @pytest.mark.parametrize("model_name", _live_redrock_models())
 def test_live_ollama_can_refine_redrock_csv_schema_sample(tmp_path, model_name: str) -> None:
     async def run() -> SemanticModel:
-        model = OllamaModelPort(model_name, options={"temperature": 0}, timeout=240)
+        model = OllamaModelPort(model_name, options=dict(RECOMMENDED_SAMPLING), timeout=240)
         if not await model.has_model():
             pytest.skip(f"Ollama model is not available: {model_name}")
 

@@ -129,6 +129,69 @@ def test_build_model_caches_then_retrains_on_request(tmp_path):
     assert forced["cached"] is False  # explicit retrain bypasses the cache
 
 
+def test_predict_serves_stored_model_without_retraining(tmp_path):
+    csv = tmp_path / "s.csv"
+    rng = np.random.default_rng(3)
+    lines = ["spend,revenue"]
+    for i in range(60):
+        spend = 100 + i * 2 + rng.normal(0, 3)
+        lines.append(f"{round(spend, 2)},{round(2 * spend + rng.normal(0, 5), 2)}")
+    csv.write_text("\n".join(lines) + "\n")
+
+    src = CsvSource(named_csvs={"s": csv})
+    semantic = SemanticModel.from_profile(profile_dataset(src))
+    tools = ModelsToolset(src, semantic, store=InMemoryModelStore(), dataset_sig="sig-p")
+
+    first = _call(tools.predict(), {"target": "revenue"})
+    second = _call(tools.predict(), {"target": "revenue"})
+    src.close()
+
+    assert first["model_cached"] is False  # trained once on first use
+    assert second["model_cached"] is True  # served from the store afterwards
+    assert first["task"] == "regression"
+    assert first["n_scored"] == 60
+    # predictions land in the plausible range of revenue ≈ 2*spend
+    assert 150 < first["prediction"]["mean"] < 700
+    assert first["drift"]["checked"] is True
+    assert first["drift"]["detected"] is False  # scored on the training distribution
+
+
+def test_predict_filters_rows_and_flags_drift(tmp_path):
+    csv = tmp_path / "s.csv"
+    rng = np.random.default_rng(4)
+    lines = ["x,y"]
+    for i in range(500):
+        lines.append(f"{i},{round(2 * i + rng.normal(0, 1), 2)}")
+    csv.write_text("\n".join(lines) + "\n")
+
+    src = CsvSource(named_csvs={"s": csv})
+    semantic = SemanticModel.from_profile(profile_dataset(src))
+    tools = ModelsToolset(src, semantic, store=InMemoryModelStore(), dataset_sig="sig-d")
+
+    out = _call(
+        tools.predict(),
+        {
+            "target": "y",
+            "predictors": ["x"],
+            "filters": [{"column": "x", "op": ">", "value": "400"}],
+        },
+    )
+    src.close()
+
+    assert out["n_scored"] == 99  # filter applied: x in 401..499
+    # trained on x∈[0,499] (mean≈250), scored on x>400 (mean≈450) → drift must flag
+    assert out["drift"]["detected"] is True
+    assert out["drift"]["worst_feature"] == "x"
+    assert "retrain" in out["drift"]["recommendation"]
+
+
+def test_predict_classification_returns_label_distribution(toolset):
+    out = _call(toolset.predict(), {"target": "converted"})
+    assert out["task"] == "classification"
+    dist = out["prediction"]["class_distribution"]
+    assert dist and set(dist) <= {"0", "1"}  # decoded labels, not raw codes
+
+
 def test_training_uses_full_table_by_default_and_honors_user_cap(tmp_path):
     csv = tmp_path / "s.csv"
     rng = np.random.default_rng(2)

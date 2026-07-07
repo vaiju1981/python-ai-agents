@@ -34,20 +34,26 @@ A `build_model` call computes the key and asks the store for a fresh model:
 | **Data changed** | dataset signature is part of the key → new data ⇒ new key ⇒ retrain | ✅ implemented |
 | **Staleness (TTL)** | `model_ttl`; a cached model older than the TTL is ignored | ✅ implemented |
 | **Explicit** | `retrain: true` argument forces a fresh fit | ✅ implemented |
-| **Drift** | watch live prediction error / input-distribution shift (via observer + eval hooks) and retrain past a threshold | 📋 planned |
-| **Scheduled** | cron / `CronCreate` retrains served models on new data on a cadence | 📋 planned |
+| **Drift** | per-feature training stats travel with the model; `predict` compares the scored rows against them (standardized mean shift, threshold 0.5) and recommends `build_model(retrain=true)` when it flags. Retraining stays an explicit call — no silent refits. | ✅ implemented |
+| **Scheduled** | by composition: any scheduler (cron, CI, Airflow) calls `build_model(retrain=true)` on its cadence. No in-process scheduler to babysit. | ✅ mechanism documented |
 
 ## Versioning & serving
 
-- Each record stores `{key, trained_at, metadata (metrics), model}`. Keep last N
-  per key; allow rollback/compare. *(first cut keeps one per key)*
-- **Serving** splits train from inference: a future `predict(model_key, rows)`
-  loads a persisted model and scores without retraining.
+- Each record stores `{key, trained_at, metadata (metrics + train stats), model}`.
+  One record per key; last-N history/rollback is deferred until something needs it.
+- **Serving — implemented:** the `predict` tool loads the stored model for a spec
+  (training once if absent) and scores rows — optionally filtered
+  (`filters: [{column, op, value}]`) — without retraining. It reports the
+  prediction summary, `model_cached`/`trained_at`, and the drift check.
 
-## First cut (implemented)
+## Implemented / deferred
 
-`ModelStore` protocol + `InMemoryModelStore`/`FileModelStore`; `build_model` does
-key-based train-once caching with TTL and an explicit `retrain` flag, and reports
-`cached` + `trained_at`. The demo wires a `FileModelStore` under the dataset's
-working directory. Drift, scheduled retrain, `forecast` caching, `predict`
-serving, and the MLflow adapter are the documented next steps.
+Implemented: `ModelStore` protocol + `InMemory`/`File` backends; key-based
+train-once caching with TTL + explicit `retrain`; `predict` serving with drift
+detection. The demo wires a `FileModelStore` under the dataset's working
+directory.
+
+Deferred until a real consumer exists: MLflow registry adapter (when deploying
+alongside MLflow, use it directly), last-N version rollback, and `forecast`
+caching (the Holt-Winters fit is sub-second on monthly aggregates — a cache
+would only add staleness).

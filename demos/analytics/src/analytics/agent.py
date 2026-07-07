@@ -56,6 +56,8 @@ def create_agent(
         "by dimensions, it cannot compute ratios.\n"
         "Predictive & causal tools (use when the question needs modeling or an experiment):\n"
         "- build_model(target, predictors?): train a model, rank feature importance.\n"
+        "- predict(target, filters?): score rows with the stored trained model (no retrain) — "
+        "use for 'predict/estimate X for <subset>'; reports drift vs training data.\n"
         "- forecast(metric, timeColumn, horizon?): project a metric forward.\n"
         "- ab_test(metric, groupColumn, groupA, groupB): compare two groups (t-test).\n"
         "- causal_effect(target, treatment, controls?): effect adjusting for confounders.\n"

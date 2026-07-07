@@ -40,7 +40,7 @@ from demos.analytics.src.analytics.csv_source import CsvSource
 from demos.analytics.src.analytics.profiler import profile_dataset
 from demos.analytics.src.analytics.semantic_model import SemanticModel
 from python_ai_agents import AgentRequest, RecordingObserver, RequestContext
-from python_ai_agents.adapters import OllamaModelPort
+from python_ai_agents.adapters import RECOMMENDED_SAMPLING, OllamaModelPort
 
 DEFAULT_MODELS = ("gemma4:31b-cloud", "ornith:latest")
 DEFAULT_OUTPUT_DIR = Path("model_scorecards")
@@ -153,9 +153,19 @@ def main() -> None:
         default=REDROCK_MAX_TRAIN_ROWS,
         help="row cap for ML tools on large tables (0 = no cap)",
     )
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--top-p", type=float, default=0.1)
-    parser.add_argument("--top-k", type=int, default=0, help="0 = omit (Ollama default)")
+    # Defaults are the vendor-recommended sampling (temp 0 made ornith loop tool calls
+    # into the step budget). Pass --temperature 0 --top-p 0.1 --top-k 0 for a
+    # deterministic reproducibility run.
+    parser.add_argument(
+        "--temperature", type=float, default=float(RECOMMENDED_SAMPLING["temperature"])
+    )
+    parser.add_argument("--top-p", type=float, default=float(RECOMMENDED_SAMPLING["top_p"]))
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=int(RECOMMENDED_SAMPLING["top_k"]),
+        help="0 = omit (Ollama default)",
+    )
     args = parser.parse_args()
     num_ctx = min(args.num_ctx, MAX_OLLAMA_CONTEXT)
     max_train_rows = args.max_train_rows or None

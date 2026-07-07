@@ -14,7 +14,12 @@ from python_ai_agents import (
     RecordingObserver,
     RequestContext,
 )
-from python_ai_agents.adapters import DEFAULT_OLLAMA_TEST_MODELS, OllamaAgent, OllamaModelPort
+from python_ai_agents.adapters import (
+    DEFAULT_OLLAMA_TEST_MODELS,
+    RECOMMENDED_SAMPLING,
+    OllamaAgent,
+    OllamaModelPort,
+)
 
 
 class FakeOllamaTransport:
@@ -98,7 +103,7 @@ def test_ollama_model_port_returns_model_response() -> None:
 @pytest.mark.parametrize("model", DEFAULT_OLLAMA_TEST_MODELS)
 def test_live_ollama_models_respond(model: str) -> None:
     async def run() -> None:
-        agent = OllamaAgent(model, options={"temperature": 0}, timeout=180)
+        agent = OllamaAgent(model, options=dict(RECOMMENDED_SAMPLING), timeout=180)
         if not await agent.has_model():
             pytest.skip(f"Ollama model is not available: {model}")
 
@@ -116,7 +121,7 @@ def test_live_ollama_models_respond(model: str) -> None:
 @pytest.mark.ollama
 def test_live_default_agent_runs_through_ollama_model_port() -> None:
     async def run() -> None:
-        model = OllamaModelPort("ornith:latest", options={"temperature": 0}, timeout=180)
+        model = OllamaModelPort("ornith:latest", options=dict(RECOMMENDED_SAMPLING), timeout=180)
         if not await model.has_model():
             pytest.skip("Ollama model is not available: ornith:latest")
 
@@ -134,7 +139,7 @@ def test_live_default_agent_runs_through_ollama_model_port() -> None:
 @pytest.mark.ollama
 def test_live_default_agent_persists_memory_with_ollama_model_port() -> None:
     async def run() -> None:
-        model = OllamaModelPort("ornith:latest", options={"temperature": 0}, timeout=180)
+        model = OllamaModelPort("ornith:latest", options=dict(RECOMMENDED_SAMPLING), timeout=180)
         if not await model.has_model():
             pytest.skip("Ollama model is not available: ornith:latest")
 
@@ -159,7 +164,7 @@ def test_live_default_agent_persists_memory_with_ollama_model_port() -> None:
 @pytest.mark.ollama
 def test_live_default_agent_observer_records_ollama_turn() -> None:
     async def run() -> None:
-        model = OllamaModelPort("ornith:latest", options={"temperature": 0}, timeout=180)
+        model = OllamaModelPort("ornith:latest", options=dict(RECOMMENDED_SAMPLING), timeout=180)
         if not await model.has_model():
             pytest.skip("Ollama model is not available: ornith:latest")
 

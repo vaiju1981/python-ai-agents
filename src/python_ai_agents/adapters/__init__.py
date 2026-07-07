@@ -4,6 +4,7 @@ from typing import Any
 
 from python_ai_agents.adapters.ollama import (
     DEFAULT_OLLAMA_TEST_MODELS,
+    RECOMMENDED_SAMPLING,
     OllamaAgent,
     OllamaError,
     OllamaHttpTransport,
@@ -12,6 +13,7 @@ from python_ai_agents.adapters.ollama import (
 
 __all__ = [
     "DEFAULT_OLLAMA_TEST_MODELS",
+    "RECOMMENDED_SAMPLING",
     "DeepEvalScorer",
     "GuardrailsAiGuardrail",
     "McpToolAdapter",
