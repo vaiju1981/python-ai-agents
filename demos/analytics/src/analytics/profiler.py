@@ -17,6 +17,7 @@ from demos.analytics.src.analytics.data_source import (
     DataSource,
     Relationship,
     TableSchema,
+    sql_qtable,
     sql_quote,
 )
 from demos.analytics.src.analytics.relationships import discover as discover_relationships
@@ -60,7 +61,7 @@ def profile_column(
 ) -> ColumnProfile:
     """Profile a single column using DuckDB SQL."""
     c = sql_quote(col.name)
-    t = sql_quote(table)
+    t = sql_qtable(table)
     numeric = is_numeric(col.physical_type)
 
     # Exact row / cardinality / null counts on the full table.

@@ -73,13 +73,23 @@ class DataSource(Protocol):
 
 
 def sql_quote(identifier: str) -> str:
-    """Quote a SQL identifier (table or column name) for DuckDB."""
-    return '"' + identifier.replace('"', '""') + '"'
+    """Quote a SQL identifier for DuckDB.
+
+    A dotted name (e.g. ``wh.sales`` or ``wh.sales.amount``) is quoted per
+    part (``"wh"."sales"``), because quoting the whole string is a single
+    literal identifier that DuckDB will not resolve as catalog.schema.table.
+    """
+    return ".".join('"' + part.replace('"', '""') + '"' for part in identifier.split("."))
+
+
+def sql_qtable(table: str) -> str:
+    """Quote a (possibly catalog/schema-qualified) table reference."""
+    return sql_quote(table)
 
 
 def sql_qcol(table: str, column: str) -> str:
     """Quote a fully-qualified column reference."""
-    return f"{sql_quote(table)}.{sql_quote(column)}"
+    return f"{sql_qtable(table)}.{sql_quote(column)}"
 
 
 def sql_literal(value: str) -> str:

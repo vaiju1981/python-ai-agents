@@ -73,7 +73,9 @@ class ModelsToolset:
         self.model_ttl = model_ttl
         # None = train on the full table (the default). A positive value caps rows
         # (reservoir sample) so the user can trade accuracy for speed on big data.
-        self.max_train_rows = max_train_rows if max_train_rows is not None else _DEFAULT_MAX_TRAIN_ROWS
+        self.max_train_rows = (
+            max_train_rows if max_train_rows is not None else _DEFAULT_MAX_TRAIN_ROWS
+        )
 
     # -- tool registry --------------------------------------------------------
 
@@ -152,8 +154,10 @@ class ModelsToolset:
             raise ValueError("no predictors available for the target")
 
         df = self._assemble_features(t_table, t_col, pred_cols)
-        x = df[[c for (_t, c) in pred_cols]].apply(pd.to_numeric, errors="coerce").dropna(
-            axis=1, how="all"
+        x = (
+            df[[c for (_t, c) in pred_cols]]
+            .apply(pd.to_numeric, errors="coerce")
+            .dropna(axis=1, how="all")
         )
         data = pd.concat([df[t_col], x], axis=1).dropna()
         if len(data) < _MIN_ROWS:
@@ -702,7 +706,7 @@ class ModelsToolset:
 
     def _resolve(self, ref: str) -> tuple[str, str]:
         if "." in ref:
-            table, col = ref.split(".", 1)
+            table, col = ref.rsplit(".", 1)
             return table, col
         for t in self.source.tables():
             for c in t.columns:
