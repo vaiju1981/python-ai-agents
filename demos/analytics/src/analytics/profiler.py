@@ -102,6 +102,9 @@ def profile_column(source: DataSource, table: str, col: ColumnSchema) -> ColumnP
 
     min_val = _to_float(agg.get("mn")) if numeric else None
     max_val = _to_float(agg.get("mx")) if numeric else None
+    name_time_hint = bool(
+        re.search(r"(time|date|epoch|ts|created|updated|timestamp|at)$", name_lower)
+    )
     if (
         numeric
         and "id-like" not in signals
@@ -109,7 +112,7 @@ def profile_column(source: DataSource, table: str, col: ColumnSchema) -> ColumnP
         and min_val >= 1e9
         and max_val is not None
         and max_val <= 5e12
-        and distinct > 10
+        and (distinct > 10 or name_time_hint)
     ):
         signals.add("epoch-like")
 

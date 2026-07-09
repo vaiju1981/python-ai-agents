@@ -13,6 +13,7 @@ insights are derived from those results, never invented.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import sys
@@ -36,7 +37,8 @@ from demos.analytics.src.analytics.models import from_env as model_from_env  # n
 from demos.analytics.src.analytics.profiler import profile_dataset  # noqa: E402
 from demos.analytics.src.analytics.schema_builder import refine_profile_with_llm  # noqa: E402
 from demos.analytics.src.analytics.semantic_model import SemanticModel  # noqa: E402
-from python_ai_agents import AgentRequest, NoopAgentObserver  # noqa: E402
+from demos.analytics.src.analytics.toolset import AnalyticsToolset  # noqa: E402
+from python_ai_agents import AgentRequest, NoopAgentObserver, RequestContext  # noqa: E402
 from python_ai_agents.core.tool import ToolResult  # noqa: E402
 
 
@@ -71,21 +73,29 @@ class _RowCapture(NoopAgentObserver):
         if result.error:
             return
         # Prefer the tool's structured payload (exact); fall back to parsing framed text.
-        if isinstance(result.data, list) and result.data and isinstance(result.data[0], dict):
-            self.rows = result.data
-            return
-        rows = _extract_rows(result.content)
+        rows = _extract_rows(result.data if result.data is not None else result.content)
         if rows:
             self.rows = rows
 
 
-def _extract_rows(text: object) -> list[dict] | None:
-    """Best-effort: pull the JSON array of row objects out of a framed tool result."""
+def _extract_rows(payload: object) -> list[dict] | None:
+    """Best-effort: find a chartable list of row dicts in a tool result.
+
+    Accepts either a list payload directly, a dict payload that embeds a
+    list-of-dicts field, or a framed text string containing a JSON array.
+    """
     import json
 
-    if not isinstance(text, str):
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        return payload
+    if isinstance(payload, dict):
+        for value in payload.values():
+            if isinstance(value, list) and value and isinstance(value[0], dict):
+                return value
         return None
-    match = re.search(r"\[.*\]", text, re.DOTALL)
+    if not isinstance(payload, str):
+        return None
+    match = re.search(r"\[.*\]", payload, re.DOTALL)
     if not match:
         return None
     try:
@@ -314,6 +324,72 @@ def main() -> None:
                     st.info("(no rows returned)")
             except Exception as exc:
                 st.error(f"SQL error: {exc}")
+
+        with st.expander("Guided query (run_query + derived metrics)"):
+            g_metrics = st.text_input("Metrics (comma-separated refs)", value="sales.amount")
+            g_dims = st.text_input("Dimensions (optional)", value="")
+            g_derived = st.text_area(
+                "Derived metrics (optional JSON, e.g. "
+                '[{"name":"avg_price","expression":"sales.amount/sales.quantity"}])',
+                height=70,
+            )
+            if st.button("Run guided query"):
+                try:
+                    derived = json.loads(g_derived) if g_derived.strip() else []
+                    args = {
+                        "metrics": [m.strip() for m in g_metrics.split(",") if m.strip()],
+                        "dimensions": [d.strip() for d in g_dims.split(",") if d.strip()],
+                        "derivedMetrics": derived,
+                    }
+                    tool = AnalyticsToolset(source, semantic).run_query()
+
+                    async def _run():
+                        return await tool.invoke(args, RequestContext.ephemeral())
+
+                    result = anyio.run(_run)
+                    if result.error:
+                        st.error(result.content)
+                    elif result.data:
+                        st.dataframe(pd.DataFrame(result.data), use_container_width=True)
+                        _render_chart(choose_chart(result.data), result.data)
+                    else:
+                        st.info(result.content)
+                except Exception as exc:
+                    st.error(f"Query error: {exc}")
+
+        with st.expander("Period comparison (compare)"):
+            c_metrics = st.text_input(
+                "Metrics (comma-separated refs)", value="sales.amount", key="cmp_metrics"
+            )
+            default_tc = semantic.time_columns[0].ref if semantic.time_columns else ""
+            c_time = st.text_input("Time column", value=default_tc, key="cmp_time")
+            c_days = st.number_input("Last N days", min_value=1, value=30, key="cmp_days")
+            c_dims = st.text_input("Dimensions (optional)", value="", key="cmp_dims")
+            if st.button("Run compare"):
+                try:
+                    args = {
+                        "metrics": [m.strip() for m in c_metrics.split(",") if m.strip()],
+                        "timeColumn": c_time.strip(),
+                        "lastDays": int(c_days),
+                        "dimensions": [d.strip() for d in c_dims.split(",") if d.strip()],
+                    }
+                    tool = AnalyticsToolset(source, semantic).compare()
+
+                    async def _run_cmp():
+                        return await tool.invoke(args, RequestContext.ephemeral())
+
+                    result = anyio.run(_run_cmp)
+                    if result.error:
+                        st.error(result.content)
+                    else:
+                        m = re.search(r"\{.*\}", result.content, re.DOTALL)
+                        if m:
+                            st.json(json.loads(m.group(0)))
+                        if result.data:
+                            st.dataframe(pd.DataFrame(result.data), use_container_width=True)
+                            _render_chart(choose_chart(result.data), result.data)
+                except Exception as exc:
+                    st.error(f"Compare error: {exc}")
 
 
 if __name__ == "__main__":

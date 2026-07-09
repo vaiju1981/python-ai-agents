@@ -107,8 +107,30 @@ class AnalyticsToolset:
                 previous = self.source.native_query_with_limit(sql_prev, 100)
 
                 result = {"current": current, "previous": previous}
+
+                # When a dimension is requested, align current vs previous into
+                # chartable rows (dimension + metric + metric_prev) so the chat
+                # can auto-plot them.
+                chart_rows: list[dict[str, Any]] | None = None
+                if dims:
+                    key = dims[0].split(".")[-1]
+                    prev_map = {r.get(key): r for r in previous if key in r}
+                    metric_cols = [m.column for m in self.model.metrics if m.ref in metrics]
+                    chart_rows = []
+                    for r in current:
+                        if key not in r:
+                            continue
+                        k = r[key]
+                        pr = prev_map.get(k, {})
+                        row: dict[str, Any] = {key: k}
+                        for mc in metric_cols:
+                            row[mc] = r.get(mc)
+                            row[f"{mc}_prev"] = pr.get(mc)
+                        chart_rows.append(row)
+
                 return ToolResult.ok(
-                    _frame("compare", json.dumps(result, default=str)[:MAX_RESULT_CHARS])
+                    _frame("compare", json.dumps(result, default=str)[:MAX_RESULT_CHARS]),
+                    data=chart_rows,
                 )
             except Exception as exc:
                 return ToolResult.failed(f"compare failed: {exc}")
@@ -466,11 +488,29 @@ def _query_schema(required: tuple[str, ...] = ("metrics",)) -> dict[str, Any]:
             "filters": _filter_schema(),
             "lastDays": {"type": "integer", "minimum": 1},
             "timeColumn": {"type": "string"},
-            "orderBy": {"type": "string"},
-            "descending": {"type": "boolean", "default": True},
-            "limit": {"type": "integer", "minimum": 1},
-            "offsetDays": {"type": "integer", "minimum": 0, "default": 0},
+        "orderBy": {"type": "string"},
+        "descending": {"type": "boolean", "default": True},
+        "limit": {"type": "integer", "minimum": 1},
+        "offsetDays": {"type": "integer", "minimum": 0, "default": 0},
+        "derivedMetrics": {
+            "type": "array",
+            "items": _object_schema(
+                {
+                    "name": {"type": "string", "description": "Alias for the derived metric."},
+                    "expression": {
+                        "type": "string",
+                        "description": (
+                            "Arithmetic expression of metric refs, e.g. "
+                            "'sales.amount/sales.quantity'. Refs become their aggregation "
+                            "(SUM/AVG) so ratios stay additive-safe."
+                        ),
+                    },
+                },
+                required=("name", "expression"),
+            ),
+            "description": "Optional derived metrics (ratios, per-unit, shares).",
         },
+    },
         required=required,
     )
 
@@ -486,6 +526,7 @@ def _parse_query_spec(args: dict[str, Any]) -> QuerySpec:
         descending=args.get("descending", True),
         limit=args.get("limit"),
         offset_days=args.get("offsetDays", 0),
+        derivedMetrics=tuple(args.get("derivedMetrics", ())),
     )
 
 

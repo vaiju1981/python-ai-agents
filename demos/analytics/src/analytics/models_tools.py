@@ -309,6 +309,7 @@ class ModelsToolset:
                     "forecast": forecast,
                     "note": "Monthly aggregation; interval ≈ ±1.96×std of month-over-month change.",
                 },
+                data=forecast,
             )
 
         return _make_tool(
@@ -670,8 +671,10 @@ def _guarded(name: str, fn: Any) -> Any:
     return invoke
 
 
-def _ok(name: str, obj: dict[str, Any]) -> ToolResult:
-    return ToolResult.ok(_frame(name, json.dumps(obj, default=str)[:MAX_RESULT_CHARS]))
+def _ok(name: str, obj: dict[str, Any], data: Any = None) -> ToolResult:
+    return ToolResult.ok(
+        _frame(name, json.dumps(obj, default=str)[:MAX_RESULT_CHARS]), data=data
+    )
 
 
 def _drift_check(train_stats: dict[str, Any], df: Any, feature_cols: list[str]) -> dict[str, Any]:

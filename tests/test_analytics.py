@@ -13,6 +13,7 @@ from demos.analytics.src.analytics.csv_source import CsvSource
 from demos.analytics.src.analytics.data_source import ColumnRole, Relationship
 from demos.analytics.src.analytics.profiler import profile_dataset
 from demos.analytics.src.analytics.query_planner import Filter, QuerySpec, plan
+from demos.analytics.src.analytics.charts import choose_chart
 from demos.analytics.src.analytics.semantic_model import Dimension, Metric, SemanticModel
 from demos.analytics.src.analytics.semantic_roles import classify_role
 from demos.analytics.src.analytics.toolset import AnalyticsToolset
@@ -265,7 +266,7 @@ def test_create_agent_wires_unique_tool_names(source):
     assert "ml_regression" not in names
 
 
-def test_multi_fact_planning_fails_instead_of_cross_joining():
+def test_multi_fact_planning_joins_facts():
     semantic = SemanticModel(
         metrics=(
             Metric(table="fact_a", column="amount", aggregation="sum"),
@@ -287,5 +288,231 @@ def test_multi_fact_planning_fails_instead_of_cross_joining():
         ),
     )
 
-    with pytest.raises(ValueError, match="multi-fact metric queries"):
-        plan(semantic, QuerySpec(metrics=("fact_a.amount", "fact_b.cost")))
+    sql = plan(semantic, QuerySpec(metrics=("fact_a.amount", "fact_b.cost")))
+    assert "JOIN" in sql
+    assert "fact_a" in sql and "fact_b" in sql
+    # Each fact is pre-aggregated in its own CTE.
+    assert "WITH" in sql
+
+
+@pytest.fixture
+def two_fact_source(tmp_path):
+    sales = tmp_path / "sales.csv"
+    sales.write_text(
+        "region,amount\n"
+        "North,100\n"
+        "South,200\n"
+        "North,50\n"
+    )
+    returns = tmp_path / "returns.csv"
+    returns.write_text(
+        "region,cost\n"
+        "North,10\n"
+        "South,25\n"
+    )
+    s = CsvSource(named_csvs={"sales": sales, "returns": returns})
+    yield s
+    s.close()
+
+
+def test_multi_fact_query_executes(two_fact_source):
+    profile = profile_dataset(two_fact_source)
+    semantic = SemanticModel.from_profile(profile)
+    tools = AnalyticsToolset(two_fact_source, semantic)
+
+    async def run():
+        result = await tools.run_query().invoke(
+            {
+                "metrics": ["sales.amount", "returns.cost"],
+                "dimensions": ["sales.region"],
+            },
+            RequestContext.ephemeral(),
+        )
+        assert not result.error, result.content
+        rows = result.data
+        by_region = {r["region"]: r for r in rows}
+        assert by_region["North"]["amount"] == 150
+        assert by_region["North"]["cost"] == 10
+        assert by_region["South"]["amount"] == 200
+        assert by_region["South"]["cost"] == 25
+
+    anyio.run(run)
+
+
+def test_compare_returns_chartable_rows(source):
+    profile = profile_dataset(source)
+    semantic = SemanticModel.from_profile(profile)
+    tools = AnalyticsToolset(source, semantic)
+
+    async def run():
+        result = await tools.compare().invoke(
+            {
+                "metrics": ["sales.amount"],
+                "timeColumn": "sales.date",
+                "lastDays": 10000,
+                "dimensions": ["sales.region"],
+            },
+            RequestContext.ephemeral(),
+        )
+        assert not result.error, result.content
+        assert isinstance(result.data, list) and result.data
+        row = result.data[0]
+        assert "region" in row
+        assert "amount" in row
+        assert "amount_prev" in row
+
+    anyio.run(run)
+
+
+def test_choose_chart_compare_rows():
+    rows = [
+        {"region": "North", "amount": 150, "amount_prev": 120},
+        {"region": "South", "amount": 200, "amount_prev": 180},
+    ]
+    spec = choose_chart(rows)
+    assert spec is not None
+    assert spec.kind == "bar"
+    assert spec.x == "region"
+
+
+def test_choose_chart_forecast_rows():
+    rows = [
+        {"step": 1, "value": 10, "low": 8, "high": 12},
+        {"step": 2, "value": 12, "low": 9, "high": 15},
+    ]
+    spec = choose_chart(rows)
+    assert spec is not None
+    assert spec.kind == "line"
+    assert spec.x == "step"
+    assert spec.y == "value"
+
+
+def test_extract_rows_from_dict_payload():
+    from demos.analytics.src.analytics.app import _extract_rows
+
+    payload = {"current": [{"region": "North", "amount": 150}], "previous": []}
+    rows = _extract_rows(payload)
+    assert rows == [{"region": "North", "amount": 150}]
+
+
+def test_query_planner_derived_metric_ratio(source):
+    profile = profile_dataset(source)
+    semantic = SemanticModel.from_profile(profile)
+    sql = plan(
+        semantic,
+        QuerySpec(
+            metrics=("sales.amount",),
+            dimensions=("sales.region",),
+            derivedMetrics=(
+                {"name": "avg_price", "expression": "sales.amount/sales.quantity"},
+            ),
+        ),
+    )
+    assert "SUM(" in sql
+    assert '"sales"."amount"' in sql and '"sales"."quantity"' in sql
+    rows = source.native_query_with_limit(sql, 10)
+    # North: amount 100+150+250+110=610, quantity 5+7+12+5=29 -> ~21.034
+    north = next(r for r in rows if r["region"] == "North")
+    assert float(north["avg_price"]) == pytest.approx(610 / 29)
+
+
+def test_run_query_derived_metric(source):
+    profile = profile_dataset(source)
+    semantic = SemanticModel.from_profile(profile)
+    tools = AnalyticsToolset(source, semantic)
+
+    async def run():
+        result = await tools.run_query().invoke(
+            {
+                "metrics": ["sales.amount"],
+                "dimensions": ["sales.region"],
+                "derivedMetrics": [
+                    {"name": "avg_price", "expression": "sales.amount/sales.quantity"}
+                ],
+            },
+            RequestContext.ephemeral(),
+        )
+        assert not result.error, result.content
+        assert "avg_price" in result.data[0]
+
+    anyio.run(run)
+
+
+@pytest.fixture
+def epoch_source(tmp_path):
+    csv = tmp_path / "events.csv"
+    # Epoch-seconds timestamps (a few distinct values, time-named column).
+    csv.write_text(
+        "ts,region,amount\n"
+        "1704067200,North,100\n"
+        "1704153600,South,200\n"
+        "1704240000,North,150\n"
+        "1704326400,East,300\n"
+    )
+    s = CsvSource(named_csvs={"events": csv})
+    yield s
+    s.close()
+
+
+def test_epoch_time_column_detected(epoch_source):
+    profile = profile_dataset(epoch_source)
+    semantic = SemanticModel.from_profile(profile)
+    assert any(t.ref == "events.ts" for t in semantic.time_columns)
+    assert semantic.time_columns[0].encoding.value == "epoch_seconds"
+
+
+def test_epoch_time_column_trend(epoch_source):
+    profile = profile_dataset(epoch_source)
+    semantic = SemanticModel.from_profile(profile)
+    tools = AnalyticsToolset(epoch_source, semantic)
+
+    async def run():
+        result = await tools.trend().invoke(
+            {
+                "metrics": ["events.amount"],
+                "timeColumn": "events.ts",
+                "grain": "day",
+                "lastDays": 10000,
+            },
+            RequestContext.ephemeral(),
+        )
+        assert not result.error, result.content
+        assert len(result.data) == 4
+
+    anyio.run(run)
+
+
+@pytest.fixture
+def chain_source(tmp_path):
+    sales = tmp_path / "sales.csv"
+    sales.write_text("region,amount\nNorth,100\nSouth,200\nNorth,50\n")
+    regions = tmp_path / "regions.csv"
+    regions.write_text("region,manager\nNorth,Alice\nSouth,Bob\n")
+    returns = tmp_path / "returns.csv"
+    returns.write_text("region,cost\nNorth,10\nSouth,25\n")
+    s = CsvSource(named_csvs={"sales": sales, "regions": regions, "returns": returns})
+    yield s
+    s.close()
+
+
+def test_multi_hop_join_via_intermediate_table(chain_source):
+    # sales & returns connect only through the regions dimension table.
+    profile = profile_dataset(chain_source)
+    semantic = SemanticModel.from_profile(profile)
+    tools = AnalyticsToolset(chain_source, semantic)
+
+    async def run():
+        result = await tools.run_query().invoke(
+            {
+                "metrics": ["sales.amount", "returns.cost"],
+                "dimensions": ["regions.manager"],
+            },
+            RequestContext.ephemeral(),
+        )
+        assert not result.error, result.content
+        by_manager = {r["manager"]: r for r in result.data}
+        assert by_manager["Alice"]["amount"] == 150
+        assert by_manager["Alice"]["cost"] == 10
+
+    anyio.run(run)
+
