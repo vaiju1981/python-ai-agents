@@ -31,14 +31,15 @@ class ToolResult:
     error: bool = False
     data: Any = None  # optional structured payload (e.g. rows) for UIs; never sent to the model
     provenance: dict[str, Any] | None = None  # audit envelope: sql, dataset fingerprint, row count, timestamp, engine version
+    trust: dict[str, Any] | None = None  # structured trust grade (tier/confidence/abstain) surfaced to the model
 
     @classmethod
-    def ok(cls, content: str, data: Any = None, provenance: dict[str, Any] | None = None) -> ToolResult:
-        return cls(content=content, data=data, provenance=provenance)
+    def ok(cls, content: str, data: Any = None, provenance: dict[str, Any] | None = None, trust: dict[str, Any] | None = None) -> ToolResult:
+        return cls(content=content, data=data, provenance=provenance, trust=trust)
 
     @classmethod
-    def failed(cls, content: str, provenance: dict[str, Any] | None = None) -> ToolResult:
-        return cls(content=content, error=True, provenance=provenance)
+    def failed(cls, content: str, provenance: dict[str, Any] | None = None, trust: dict[str, Any] | None = None) -> ToolResult:
+        return cls(content=content, error=True, provenance=provenance, trust=trust)
 
 
 class Tool(Protocol):

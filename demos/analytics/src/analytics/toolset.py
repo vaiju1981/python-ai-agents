@@ -63,7 +63,9 @@ class AnalyticsToolset:
                         tags={"tool": current_tool() or "unknown"},
                     )
         env = build_envelope(self.source, sql=sql, row_count=row_count, **extra)
-        return ToolResult.ok(content, data, provenance=env.to_dict())
+        return ToolResult.ok(
+            content, data, provenance=env.to_dict(), trust=trust if trust is not None else None
+        )
 
     def _table_rows(self, table: str) -> int:
         """Cheap exact row count for a table (evidence for trust grading)."""

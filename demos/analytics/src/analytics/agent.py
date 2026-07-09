@@ -73,7 +73,11 @@ def create_agent(
         "- cluster(columns, k?): segment rows. anomaly_detection(columns): flag outliers.\n"
         "After the tool returns, STOP calling tools and answer with the numbers. Never present "
         "unfiltered numbers as if filtered; do not claim causation from correlation — cite the "
-        "tool's caveat when reporting causal_effect or uplift."
+        "tool's caveat when reporting causal_effect or uplift.\n"
+        "Every tool result may carry a [TRUST:TIER] marker (TRUSTED / DIRECTIONAL / "
+        "INSUFFICIENT). Honor it: on [TRUST:INSUFFICIENT] do NOT make causal or confident "
+        "claims — say the evidence is insufficient and what data would be needed; on "
+        "[TRUST:DIRECTIONAL] present the finding but flag it as directional, not definitive."
     )
 
     return DefaultAgent(

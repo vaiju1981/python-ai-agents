@@ -215,7 +215,11 @@ class DefaultAgent:
             return failed
         await self._record(AuditEvent.now("tool.end", request.context, f"tool={name}"))
         capped = ToolResult(
-            outcome.content[: self.max_tool_result_chars], outcome.error, outcome.data
+            outcome.content[: self.max_tool_result_chars],
+            outcome.error,
+            outcome.data,
+            outcome.provenance,
+            outcome.trust,
         )
         await self._notify("on_tool_result", name, capped, _duration_since(tool_start))
         return capped
@@ -265,11 +269,31 @@ async def _invoke_with_timeout(
     return result
 
 
+def _trust_marker(trust: dict[str, Any] | None) -> str:
+    """Machine-checkable trust-grade signal rendered into the model message.
+
+    A tool that sets ``ToolResult.trust`` gets a ``[TRUST:TIER]`` token so the
+    model can honor the grade programmatically (e.g. abstain from causal claims
+    on ``[TRUST:INSUFFICIENT]``) rather than having to parse prose.
+    """
+    if not trust:
+        return ""
+    tier = trust.get("tier")
+    if not tier:
+        return ""
+    if tier == "INSUFFICIENT":
+        return "[TRUST:INSUFFICIENT] — insufficient evidence; do not assert causal or confident claims."
+    return f"[TRUST:{tier}]"
+
+
 def _tool_result_for_model(name: str, result: ToolResult, frame: bool) -> str:
     if not frame:
-        return result.content
-    status = "error" if result.error else "ok"
-    return f"tool '{name}' result ({status}):\n{result.content}"
+        body = result.content
+    else:
+        status = "error" if result.error else "ok"
+        body = f"tool '{name}' result ({status}):\n{result.content}"
+    marker = _trust_marker(result.trust)
+    return f"{body}\n{marker}" if marker else body
 
 
 def _new_turn_memory(system_prompt: str | None, input_text: str) -> Memory:

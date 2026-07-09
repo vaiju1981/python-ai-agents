@@ -233,27 +233,35 @@ undefined today.
 
 ## PR-6 — LLM trust-grade coupling test
 
+**Status:** ✅ implemented.
+
 **Why:** The tracker claims "the graded tier is surfaced to the model," but
 nothing tests that the agent loop actually injects the trust grade into the
 prompt and that the model respects abstentions. This is the linchpin of the
 "defensible answers" story.
 
-**Implement:**
-- Make the trust grade + abstention signal an explicit, structured field the
-  `agent.py` / tool-result formatter passes to the LLM (not just prose in the
-  answer body).
-- Add a contract test: given a tool result with `INSUFFICIENT` grade, the
-  formatted message must contain a machine-checkable marker the agent is
-  instructed to honor (e.g. `[TRUST:INSUFFICIENT]`), and an agent prompt unit
-  test asserts the model is told to abstain from causal claims.
+**What shipped:**
+- `python_ai_agents.core.tool.ToolResult` gained a structured `trust` field
+  (tier/confidence/abstain) carried on every result, not just as prose in the
+  answer body or the provenance envelope.
+- `default_agent._tool_result_for_model` (the tool-result formatter) now renders
+  a machine-checkable `[TRUST:TIER]` token from `result.trust` — and for
+  `INSUFFICIENT` it appends an explicit non-assertion directive. `_invoke_tool`
+  preserves `trust` (and `provenance`) when capping the result for the model.
+- `AnalyticsToolset._ok` / `ModelsToolset._ok` set `trust=` on the `ToolResult`.
+- `agent.create_agent` system prompt instructs the model to honor
+  `[TRUST:...]`: abstain from causal/confident claims on `[TRUST:INSUFFICIENT]`,
+  flag `[TRUST:DIRECTIONAL]` as directional not definitive.
 
-**Verify (E2E):**
-- Unit test: format a `ModelsToolset._ok` result at each tier → assert the
-  emitted token matches the expected string per tier.
-- Agent test: feed an `INSUFFICIENT` `matched_impact` result into the agent
-  formatter; assert the downstream prompt instructs non-assertion.
-- Optional live check (flagged): run the agent on thin-evidence data and assert
-  the final answer contains an abstention rather than a confident causal claim.
+**Verify (E2E):** `tests/test_trust_grade_coupling.py`
+- `ModelsToolset._ok` at each tier → rendered message contains `[TRUST:{TIER}]`;
+  `INSUFFICIENT` additionally contains the "do not assert causal" directive.
+- An `INSUFFICIENT` causal-style result rendered through the agent formatter
+  carries `[TRUST:INSUFFICIENT]` + non-assertion instruction, and
+  `create_agent(...).system_prompt` instructs the model to honor it.
+- Optional live check (flagged, `PAA_RUN_OLLAMA_TESTS=1`): the agent on
+  thin-evidence data answers with an abstention rather than a confident causal
+  claim.
 
 ---
 

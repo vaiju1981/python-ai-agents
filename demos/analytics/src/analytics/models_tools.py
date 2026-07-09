@@ -119,7 +119,9 @@ class ModelsToolset:
             extra["trust"] = trust
         content = _frame(name, json.dumps(obj, default=str)[:MAX_RESULT_CHARS])
         env = build_envelope(self.source, **extra)
-        return ToolResult.ok(content, data=data, provenance=env.to_dict())
+        return ToolResult.ok(
+            content, data=data, provenance=env.to_dict(), trust=trust if trust is not None else None
+        )
 
     def all_tools(self) -> list[Tool]:
         return [
