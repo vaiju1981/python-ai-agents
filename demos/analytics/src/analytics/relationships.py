@@ -7,6 +7,7 @@ confident keys become seeds for composite key search.
 
 from __future__ import annotations
 
+import itertools
 import os
 import time
 from typing import Any
@@ -21,7 +22,9 @@ from demos.analytics.src.analytics.data_source import (
 
 MIN_COVERAGE = 0.8
 MIN_PARTIAL_COVERAGE = 0.05
-MAX_COMPOSITE_KEY_SIZE = 2
+# Maximum number of columns in a composite join key. Raised past 2 so tables
+# that only join on a (e.g.) (store, product, day) tuple are discovered.
+MAX_COMPOSITE_KEY_SIZE = int(os.getenv("ANALYTICS_MAX_COMPOSITE_KEY_SIZE", "3"))
 
 # Global wall-clock budget for relationship discovery. At hundreds of tables the
 # pairwise column-overlap probing is O(tables^2 * cols^2); once the budget is
@@ -86,12 +89,20 @@ def discover(
                         continue
                     if rel.coverage >= MIN_COVERAGE:
                         confident.append(rel)
+                        # A confident but non-unique (fan-out) single-column
+                        # match is also a seed: a composite key built from
+                        # several such columns may be selective enough to avoid
+                        # the many-to-many fan-out.
+                        if rel.cardinality == "many_to_many":
+                            seeds.setdefault(f"{t1}\0{t2}", []).append(
+                                (t1, c1_name, t2, c2_name)
+                            )
                     elif rel.coverage >= MIN_PARTIAL_COVERAGE:
                         pair_key = f"{t1}\0{t2}"
                         coarse_by_pair[pair_key] = rel
                         seeds.setdefault(pair_key, []).append((t1, c1_name, t2, c2_name))
 
-    composites = _discover_composite(source, roles_by_table, seeds, stats_by_ref)
+    composites = _discover_composite(source, roles_by_table, seeds, stats_by_ref, start)
     superseded = set(composites.keys())
 
     result = list(confident)
@@ -141,6 +152,7 @@ def _test_pair(
         return None
 
     t1_non_null = int(t1_stats.get("non_null", 0))
+    t1_rows = int(t1_stats.get("total", 0)) or 0
     t1_distinct = int(t1_stats.get("distinct_val", 0))
     t2_distinct = int(t2_stats.get("distinct_val", 0))
     matched = int(overlap.get("matched", 0))
@@ -151,7 +163,13 @@ def _test_pair(
     if coverage < MIN_PARTIAL_COVERAGE:
         return None
 
-    cardinality = "many_to_one" if t2_distinct < t1_distinct else "one_to_one"
+    # Cardinality is derived from key uniqueness on each side, not just raw
+    # distinct-value counts: a key that is unique on both sides is one-to-one;
+    # a key non-unique on the from-side only is many-to-one; non-unique on both
+    # is many-to-many (fan-out risk for feature assembly).
+    from_unique = t1_distinct >= t1_rows * 0.999 if t1_rows else False
+    to_unique = t2_distinct >= t1_rows  # conservative: to-key at least as unique as from
+    cardinality = _cardinality(from_unique, to_unique)
 
     return Relationship(
         from_table=t1,
@@ -163,24 +181,73 @@ def _test_pair(
     )
 
 
+def _cardinality(from_unique: bool, to_unique: bool) -> str:
+    """Map key-uniqueness on each side to an explicit join cardinality."""
+    if from_unique and to_unique:
+        return "one_to_one"
+    if from_unique and not to_unique:
+        return "one_to_one"
+    if (not from_unique) and to_unique:
+        return "many_to_one"
+    return "many_to_many"
+
+
 def _discover_composite(
     source: DataSource,
     roles_by_table: dict[str, dict[str, ColumnRole]],
     seeds: dict[str, list[tuple[str, str, str, str]]],
     stats_by_ref: dict[str, Any],
+    start: float | None = None,
 ) -> dict[str, list[Relationship]]:
-    """Search for composite (multi-column) join keys."""
+    """Search for composite (multi-column) join keys up to ``MAX_COMPOSITE_KEY_SIZE``.
+
+    Seeds are single-column partial-coverage pairs. Each pair that produced at
+    least two seed columns is expanded into combinations of size 2..N (matching
+    column counts on both sides) and each candidate composite key is tested. The
+    global discovery budget bounds the work.
+    """
     result: dict[str, list[Relationship]] = {}
     for pair_key, seed_list in seeds.items():
         if len(seed_list) < 2:
             continue
         t1, c1a, t2, c2a = seed_list[0]
-        for _, c1b, _, c2b in seed_list[1:]:
-            if c1b == c1a or c2b == c2a:
-                continue
-            rel = _test_composite(source, t1, [c1a, c1b], t2, [c2a, c2b])
-            if rel and rel.coverage >= MIN_COVERAGE:
-                result.setdefault(pair_key, []).append(rel)
+        # Distinct seed columns per side.
+        cols1: list[str] = []
+        cols2: list[str] = []
+        for _, c1, _, c2 in seed_list:
+            if c1 not in cols1:
+                cols1.append(c1)
+            if c2 not in cols2:
+                cols2.append(c2)
+        if c1a not in cols1:
+            cols1.insert(0, c1a)
+        if c2a not in cols2:
+            cols2.insert(0, c2a)
+
+        max_k = min(MAX_COMPOSITE_KEY_SIZE, len(cols1), len(cols2))
+        tested = 0
+        # Cap candidate combinations per pair so the search stays bounded even
+        # when many columns look join-like (e.g. wide dimension tables).
+        PER_PAIR_CAP = int(os.getenv("ANALYTICS_COMPOSITE_PAIR_CAP", "50"))
+        for k in range(2, max_k + 1):
+            for combo1 in itertools.combinations(cols1, k):
+                if tested >= PER_PAIR_CAP:
+                    break
+                for combo2 in itertools.combinations(cols2, k):
+                    if tested >= PER_PAIR_CAP:
+                        break
+                    # Same-named columns are a valid join across *different*
+                    # tables; only skip identical column sets on a self-join.
+                    if t1 == t2 and any(a == b for a, b in zip(combo1, combo2)):
+                        continue
+                    tested += 1
+                    rel = _test_composite(source, t1, list(combo1), t2, list(combo2))
+                    if rel and rel.coverage >= MIN_COVERAGE:
+                        result.setdefault(pair_key, []).append(rel)
+            if tested >= PER_PAIR_CAP:
+                break
+            if start is not None and time.monotonic() - start > _DISCOVERY_BUDGET_SECONDS:
+                break
     return result
 
 
@@ -191,29 +258,38 @@ def _test_composite(
     t2: str,
     cols2: list[str],
 ) -> Relationship | None:
-    """Test a composite key join."""
+    """Test a composite key join, with explicit cardinality from key uniqueness."""
     q1 = ", ".join(sql_qcol(t1, c) for c in cols1)
     q2 = ", ".join(sql_qcol(t2, c) for c in cols2)
     try:
         result = source.native_query(
             f"SELECT COUNT(*) AS total, "
+            f"COUNT(DISTINCT ({q1})) AS from_distinct, "
             f"COUNT(*) FILTER (WHERE ({q1}) IN (SELECT {q2} FROM {sql_quote(t2)})) AS matched "
             f"FROM {sql_quote(t1)}"
+        )[0]
+        to_distinct = source.native_query(
+            f"SELECT COUNT(DISTINCT ({q2})) AS d FROM {sql_quote(t2)}"
         )[0]
     except Exception:
         return None
     total = int(result.get("total", 0))
     matched = int(result.get("matched", 0))
+    from_distinct = int(result.get("from_distinct", 0))
+    to_distinct_v = int(to_distinct.get("d", 0))
     if total == 0:
         return None
     coverage = matched / total
     if coverage < MIN_PARTIAL_COVERAGE:
         return None
+    from_unique = from_distinct >= total * 0.999
+    to_unique = to_distinct_v >= total * 0.999
+    cardinality = _cardinality(from_unique, to_unique)
     return Relationship(
         from_table=t1,
         from_columns=tuple(cols1),
         to_table=t2,
         to_columns=tuple(cols2),
-        cardinality="many_to_one",
+        cardinality=cardinality,
         coverage=coverage,
     )

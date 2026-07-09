@@ -30,6 +30,53 @@ class AnalyticsToolset:
     def catalog_json(self) -> str:
         return self.model.catalog_json(self.source.tables(), self.catalog)
 
+    def _ok(self, content: str, data: Any = None, *, sql: str | None = None,
+            row_count: int | None = None, n: int | None = None,
+            coverage: float | None = None, gates: dict[str, bool] | None = None,
+            trust: dict[str, Any] | None = None, **extra: Any) -> ToolResult:
+        """Wrap a successful result with a provenance envelope + trust grade (P0).
+
+        Every answer carries a trust tier (TRUSTED / DIRECTIONAL / INSUFFICIENT)
+        derived from the evidence it rests on (sample size ``n``, ``coverage``,
+        validation ``gates``). Callers pass a pre-computed ``trust`` dict, or the
+        evidence (``n`` / ``coverage`` / ``gates``) for the grade to be computed.
+        """
+        from demos.analytics.src.analytics.provenance import build_envelope
+
+        if trust is None and (n is not None or coverage is not None or gates):
+            from demos.analytics.src.analytics.trust import grade
+
+            trust = grade(coverage=coverage, n=n, gates=gates).to_dict()
+        if trust is not None:
+            extra["trust"] = trust
+            tier = trust.get("tier")
+            if tier and tier != "TRUSTED":
+                reasons = "; ".join(trust.get("reasons", [])[:2])
+                content = f"{content}\n[trust: {tier}{' — ' + reasons if reasons else ''}]"
+        env = build_envelope(self.source, sql=sql, row_count=row_count, **extra)
+        return ToolResult.ok(content, data, provenance=env.to_dict())
+
+    def _table_rows(self, table: str) -> int:
+        """Cheap exact row count for a table (evidence for trust grading)."""
+        try:
+            r = self.source.native_query(f"SELECT COUNT(*) AS n FROM {sql_quote(table)}")
+            return int(r[0].get("n", 0)) if r else 0
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _abstain(kind: str, trust: dict[str, Any], detail: str) -> str:
+        return (
+            f"[{kind} — ABSTAIN] insufficient evidence to answer defensibly "
+            f"(trust={trust.get('tier')}; {detail}). I will not guess."
+        )
+
+    def _fail(self, msg: str, *, sql: str | None = None) -> ToolResult:
+        from demos.analytics.src.analytics.provenance import build_envelope
+
+        env = build_envelope(self.source, sql=sql)
+        return ToolResult.failed(msg, provenance=env.to_dict())
+
     def describe_dataset(self) -> Tool:
         async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
             tables = self.source.tables()
@@ -47,7 +94,7 @@ class AnalyticsToolset:
                         f"{r.to_table}.{','.join(r.to_columns)} ({r.cardinality})"
                     )
             text = "\n".join(lines)[:MAX_RESULT_CHARS]
-            return ToolResult.ok(text)
+            return self._ok(text)
 
         return _make_tool(
             "describe_dataset",
@@ -62,9 +109,15 @@ class AnalyticsToolset:
                 spec = _parse_query_spec(arguments)
                 sql = plan(self.model, spec)
                 rows = self.source.native_query_with_limit(sql, 500)
-                return ToolResult.ok(_format_rows(sql, rows), data=rows)
+                # Evidence = rows of the primary base table the query aggregates.
+                base = _resolve_table(self.model, spec.metrics[0]) if spec.metrics else None
+                n = self._table_rows(base) if base else len(rows)
+                return self._ok(
+                    _format_rows(sql, rows), data=rows, sql=sql,
+                    row_count=len(rows), n=n, coverage=1.0,
+                )
             except Exception as exc:
-                return ToolResult.failed(f"run_query failed: {exc}")
+                return self._fail(f"run_query failed: {exc}")
 
         return _make_tool(
             "run_query",
@@ -128,12 +181,13 @@ class AnalyticsToolset:
                             row[f"{mc}_prev"] = pr.get(mc)
                         chart_rows.append(row)
 
-                return ToolResult.ok(
+                return self._ok(
                     _frame("compare", json.dumps(result, default=str)[:MAX_RESULT_CHARS]),
                     data=chart_rows,
+                    n=len(current) + len(previous), coverage=1.0,
                 )
             except Exception as exc:
-                return ToolResult.failed(f"compare failed: {exc}")
+                return self._fail(f"compare failed: {exc}")
 
         return _make_tool(
             "compare",
@@ -180,12 +234,13 @@ class AnalyticsToolset:
                     "GROUP BY period ORDER BY period"
                 )
                 rows = self.source.native_query_with_limit(sql, 100)
-                return ToolResult.ok(
+                return self._ok(
                     _frame("trend", json.dumps(rows, default=str)[:MAX_RESULT_CHARS]),
-                    data=rows,
+                    data=rows, sql=sql, row_count=len(rows),
+                    n=self._table_rows(tc.table), coverage=1.0,
                 )
             except Exception as exc:
-                return ToolResult.failed(f"trend failed: {exc}")
+                return self._fail(f"trend failed: {exc}")
 
         return _make_tool(
             "trend",
@@ -221,11 +276,12 @@ class AnalyticsToolset:
                     f"percentile_cont(0.75) WITHIN GROUP (ORDER BY {q}) AS p75 "
                     f"FROM {sql_quote(m.table)}"
                 )
-                return ToolResult.ok(
-                    _frame("summarize", json.dumps(stats[0] if stats else {}, default=str))
+                return self._ok(
+                    _frame("summarize", json.dumps(stats[0] if stats else {}, default=str)),
+                    sql=None, n=self._table_rows(m.table), coverage=1.0,
                 )
             except Exception as exc:
-                return ToolResult.failed(f"summarize failed: {exc}")
+                return self._fail(f"summarize failed: {exc}")
 
         return _make_tool(
             "summarize",
@@ -270,9 +326,12 @@ class AnalyticsToolset:
                     except Exception:
                         continue
                 results.sort(key=lambda x: abs(x["correlation"]), reverse=True)
-                return ToolResult.ok(_frame("correlate", json.dumps(results[:10], default=str)))
+                return self._ok(
+                    _frame("correlate", json.dumps(results[:10], default=str)),
+                    n=self._table_rows(t.table), coverage=1.0,
+                )
             except Exception as exc:
-                return ToolResult.failed(f"correlate failed: {exc}")
+                return self._fail(f"correlate failed: {exc}")
 
         return _make_tool(
             "correlate",
@@ -301,12 +360,12 @@ class AnalyticsToolset:
                     f"ORDER BY ABS({q}) DESC LIMIT 20",
                     20,
                 )
-                return ToolResult.ok(
+                return self._ok(
                     _frame("outliers", json.dumps(rows, default=str)[:MAX_RESULT_CHARS]),
-                    data=rows,
+                    data=rows, n=self._table_rows(m.table), coverage=1.0,
                 )
             except Exception as exc:
-                return ToolResult.failed(f"outliers failed: {exc}")
+                return self._fail(f"outliers failed: {exc}")
 
         return _make_tool(
             "outliers",
@@ -362,9 +421,13 @@ class AnalyticsToolset:
                     "intercept": round(float(model.intercept_), 4),
                     "r_squared": round(float(model.score(X, y)), 4),
                 }
-                return ToolResult.ok(_frame("regression", json.dumps(result, default=str)))
+                return self._ok(
+                    _frame("regression", json.dumps(result, default=str)),
+                    n=len(rows), coverage=1.0,
+                    gates={"r2_positive": float(model.score(X, y)) > 0.0},
+                )
             except Exception as exc:
-                return ToolResult.failed(f"regression failed: {exc}")
+                return self._fail(f"regression failed: {exc}")
 
         return _make_tool(
             "regression",
@@ -388,12 +451,13 @@ class AnalyticsToolset:
                 if reason is not None:
                     return ToolResult.failed(reason)
                 rows = self.source.native_query_with_limit(sql, 500)
-                return ToolResult.ok(
+                return self._ok(
                     _frame("run_sql", json.dumps(rows, default=str)[:MAX_RESULT_CHARS]),
-                    data=rows,
+                    data=rows, sql=sql, row_count=len(rows),
+                    n=len(rows), coverage=1.0,
                 )
             except Exception as exc:
-                return ToolResult.failed(f"run_sql failed: {exc}")
+                return self._fail(f"run_sql failed: {exc}")
 
         return _make_tool(
             "run_sql",
@@ -419,7 +483,106 @@ class AnalyticsToolset:
             self.run_sql(),
             self.event_impact(),
             self.change_point(),
+            self.matched_impact(),
+            self.conformal_forecast(),
+            self.segment(),
+            self.portfolio_optimize(),
+            self.propose_decision(),
+            self.freshness(),
+            self.reconcile(),
+            self.verify_query(),
         ]
+
+    def matched_impact(self) -> Tool:
+        """Matched-control difference-in-differences causal impact (generic).
+
+        Estimates the effect of treatment events (from a treatment/changelog
+        table) on a measured value using caliper-matched never-treated controls,
+        an A/A synthetic null for the noise floor, and a parallel-trends gate.
+        Column-agnostic: pass the value/entity/date columns explicitly.
+        """
+
+        async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
+            try:
+                from demos.analytics.src.analytics.backtest import matched_impact
+
+                res = matched_impact(
+                    self.source,
+                    self.model,
+                    value_col=arguments.get("valueCol", ""),
+                    entity_col=arguments.get("entityCol", ""),
+                    date_col=arguments.get("dateCol", ""),
+                    treatment_table=arguments.get("treatmentTable", ""),
+                    treatment_key=arguments.get("treatmentKey", ""),
+                    treatment_date_col=arguments.get("treatmentDateCol", ""),
+                    treatment_filter=arguments.get("treatmentFilter"),
+                    exposure_col=arguments.get("exposureCol"),
+                    pre_days=int(arguments.get("preDays", 14)),
+                    post_days=int(arguments.get("postDays", 14)),
+                )
+                # Trust-grade + abstain: refuse to assert a causal claim when the
+                # evidence is insufficient rather than reporting a noisy guess.
+                from demos.analytics.src.analytics.trust import (
+                    TrustGrade,
+                    grade,
+                    should_abstain,
+                )
+
+                tier_map = {
+                    "TRUSTED": "TRUSTED",
+                    "DIRECTIONAL": "DIRECTIONAL",
+                    "NOISY": "INSUFFICIENT",
+                    "INSUFFICIENT": "INSUFFICIENT",
+                }
+                tg = grade(
+                    coverage=min(1.0, res.n_controls / max(1, res.n_treated)) if res.n_treated else 0.0,
+                    n=res.n_treated + res.n_controls,
+                    gates={"aa": abs(res.null_median) <= 10, "parallelTrends": not res.detrended},
+                )
+                mapped = tier_map.get(res.verdict, "DIRECTIONAL")
+                tg = TrustGrade(
+                    tier=_min_trust(mapped, tg.tier),
+                    confidence=tg.confidence, reasons=tg.reasons + [f"verdict={res.verdict}"],
+                )
+                if should_abstain(tg):
+                    content = (
+                        f"[matched_impact — ABSTAIN] {res.verdict}: insufficient evidence "
+                        f"(n_treated={res.n_treated}, n_controls={res.n_controls}). "
+                        f"I will not assert a causal effect."
+                    )
+                    return self._ok(content, data=res.to_dict(), trust=tg.to_dict())
+                return self._ok(
+                    _frame("matched_impact", json.dumps(res.to_dict(), default=str)),
+                    data=res.to_dict(), trust=tg.to_dict(),
+                )
+            except Exception as exc:
+                return self._fail(f"matched_impact failed: {exc}")
+
+        return _make_tool(
+            "matched_impact",
+            "Causal impact of events via matched-control DiD. Args: valueCol, "
+            "entityCol, dateCol, treatmentTable, treatmentKey, treatmentDateCol, "
+            "exposureCol? (rate denominator), treatmentFilter?, preDays?, postDays?.",
+            invoke,
+            _object_schema(
+                {
+                    "valueCol": {"type": "string", "description": "Metric the event affects."},
+                    "entityCol": {"type": "string", "description": "Entity column in the value table."},
+                    "dateCol": {"type": "string", "description": "Date column in the value table."},
+                    "treatmentTable": {"type": "string", "description": "Table of (entity, date) events."},
+                    "treatmentKey": {"type": "string", "description": "Entity column in the treatment table."},
+                    "treatmentDateCol": {"type": "string", "description": "Event date column."},
+                    "exposureCol": {"type": "string", "description": "Optional rate denominator (per-unit exposure)."},
+                    "treatmentFilter": {"type": "string", "description": "Optional SQL WHERE on the treatment table."},
+                    "preDays": {"type": "integer", "minimum": 1, "default": 14},
+                    "postDays": {"type": "integer", "minimum": 1, "default": 14},
+                },
+                required=(
+                    "valueCol", "entityCol", "dateCol", "treatmentTable",
+                    "treatmentKey", "treatmentDateCol",
+                ),
+            ),
+        )
 
     def event_impact(self) -> Tool:
         """Impact of events (from an event/changelog table) on a metric.
@@ -499,12 +662,25 @@ class AnalyticsToolset:
                 empty = rows[0].get("n_pre") in (0, None) and rows[0].get("n_post") in (0, None)
                 if not rows or empty:
                     return ToolResult.failed("no metric rows found in the pre/post windows")
-                return ToolResult.ok(
+                # Trust-grade the causal claim on the pre/post sample sizes.
+                from demos.analytics.src.analytics.trust import grade, should_abstain
+
+                n_pre = sum(int(r.get("n_pre") or 0) for r in rows)
+                n_post = sum(int(r.get("n_post") or 0) for r in rows)
+                tg = grade(coverage=1.0, n=min(n_pre, n_post),
+                           gates={"has_pre": n_pre > 0, "has_post": n_post > 0})
+                if should_abstain(tg):
+                    return self._ok(
+                        self._abstain("event_impact", tg.to_dict(),
+                                      f"n_pre={n_pre}, n_post={n_post}"),
+                        data=rows, sql=sql, trust=tg.to_dict(),
+                    )
+                return self._ok(
                     _frame("event_impact", json.dumps(rows, default=str)[:MAX_RESULT_CHARS]),
-                    data=rows,
+                    data=rows, sql=sql, trust=tg.to_dict(),
                 )
             except Exception as exc:
-                return ToolResult.failed(f"event_impact failed: {exc}")
+                return self._fail(f"event_impact failed: {exc}")
 
         return _make_tool(
             "event_impact",
@@ -601,12 +777,17 @@ class AnalyticsToolset:
                             "cohens_d": round(float(_cohen_d(pre, post)), 3),
                         }
                     )
-                return ToolResult.ok(
+                # Grade on the length of the analyzed series (evidence for breaks).
+                from demos.analytics.src.analytics.trust import grade
+
+                tg = grade(coverage=1.0, n=len(series),
+                           gates={"has_break": bool(out)})
+                return self._ok(
                     _frame("change_point", json.dumps(out, default=str)[:MAX_RESULT_CHARS]),
-                    data=out,
+                    data=out, sql=sql, trust=tg.to_dict(),
                 )
             except Exception as exc:
-                return ToolResult.failed(f"change_point failed: {exc}")
+                return self._fail(f"change_point failed: {exc}")
 
         return _make_tool(
             "change_point",
@@ -623,6 +804,321 @@ class AnalyticsToolset:
                 required=("metric", "timeColumn"),
             ),
         )
+
+
+    def conformal_forecast(self) -> Tool:
+        """Walk-forward forecast with split-conformal (CQR) intervals (generic)."""
+
+        async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
+            try:
+                from demos.analytics.src.analytics.conformal import conformal_forecast
+
+                res = conformal_forecast(
+                    self.source, self.model,
+                    value_col=arguments.get("valueCol", ""),
+                    date_col=arguments.get("dateCol", ""),
+                    entity_col=arguments.get("entityCol"),
+                    feature_cols=arguments.get("featureCols"),
+                    horizon=int(arguments.get("horizon", 14)),
+                    lags=int(arguments.get("lags", 7)),
+                )
+                d = res.to_dict()
+                from demos.analytics.src.analytics.trust import grade
+
+                tg = grade(
+                    coverage=float(d.get("intervalCoverageCal") or 0.0),
+                    n=int(d.get("nTrain") or 0),
+                    gates={"calibrated": float(d.get("intervalCoverageCal") or 0.0) >= 0.8},
+                )
+                return self._ok(
+                    _frame("conformal_forecast", json.dumps(d, default=str)),
+                    data=d, trust=tg.to_dict(),
+                )
+            except Exception as exc:
+                return self._fail(f"conformal_forecast failed: {exc}")
+
+        return _make_tool(
+            "conformal_forecast",
+            "Honest forecast with conformal low/high bands. Args: valueCol, dateCol, "
+            "entityCol? (aggregate per entity), featureCols?, horizon?, lags?.",
+            invoke,
+            _object_schema(
+                {
+                    "valueCol": {"type": "string", "description": "Metric to forecast."},
+                    "dateCol": {"type": "string", "description": "Date column."},
+                    "entityCol": {"type": "string", "description": "Optional entity column (sum per entity)."},
+                    "featureCols": _string_array("Optional extra feature columns."),
+                    "horizon": {"type": "integer", "minimum": 1, "default": 14},
+                    "lags": {"type": "integer", "minimum": 1, "default": 7},
+                },
+                required=("valueCol", "dateCol"),
+            ),
+        )
+
+    def segment(self) -> Tool:
+        """Segment entities by value intensity (generic cohort segmentation)."""
+
+        async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
+            try:
+                from demos.analytics.src.analytics.segmentation import segment
+
+                res = segment(
+                    self.source, self.model,
+                    value_col=arguments.get("valueCol", ""),
+                    entity_col=arguments.get("entityCol", ""),
+                    dimension_col=arguments.get("dimensionCol"),
+                    date_col=arguments.get("dateCol"),
+                    last_days=arguments.get("lastDays"),
+                    n_tiers=int(arguments.get("nTiers", 4)),
+                )
+                d = res.to_dict()
+                return self._ok(
+                    _frame("segment", json.dumps(d, default=str)),
+                    data=d, n=int(d.get("nEntities") or 0), coverage=1.0,
+                )
+            except Exception as exc:
+                return self._fail(f"segment failed: {exc}")
+
+        return _make_tool(
+            "segment",
+            "Bucket entities into value tiers with size/mean/share. Args: valueCol, "
+            "entityCol, dimensionCol? (breakdown), dateCol?, lastDays?, nTiers?.",
+            invoke,
+            _object_schema(
+                {
+                    "valueCol": {"type": "string", "description": "Value metric (summed per entity)."},
+                    "entityCol": {"type": "string", "description": "Entity column to segment."},
+                    "dimensionCol": {"type": "string", "description": "Optional category to break tiers down by."},
+                    "dateCol": {"type": "string", "description": "Optional time column for windowing."},
+                    "lastDays": {"type": "integer", "minimum": 1},
+                    "nTiers": {"type": "integer", "minimum": 1, "default": 4},
+                },
+                required=("valueCol", "entityCol"),
+            ),
+        )
+
+    def portfolio_optimize(self) -> Tool:
+        """Budget-constrained portfolio optimizer over scored actions (generic)."""
+
+        async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
+            try:
+                from demos.analytics.src.analytics.portfolio import (
+                    greedy_budget_frontier,
+                    pareto_frontier,
+                )
+
+                recs = arguments.get("actions", [])
+                if not recs:
+                    return ToolResult.failed("actions (list of scored items) is required")
+                reserved = set(arguments.get("reserved", []))
+                mode = arguments.get("mode", "greedy")
+                if mode == "pareto":
+                    result = pareto_frontier(
+                        recs,
+                        budget=int(arguments.get("budget", 12)),
+                        objectives=[tuple(o) for o in arguments.get("objectives", [("value", "max")])],
+                        group_col=arguments.get("groupCol", "group"),
+                        per_group_cap=int(arguments.get("perGroupCap", 1)),
+                        reserved=reserved,
+                    )
+                else:
+                    result = greedy_budget_frontier(
+                        recs,
+                        value_axis=arguments.get("valueAxis", "value"),
+                        max_changes=int(arguments.get("budget", 24)),
+                        per_group_cap=int(arguments.get("perGroupCap", 1)),
+                        group_col=arguments.get("groupCol", "group"),
+                        reserved=reserved,
+                    )
+                return self._ok(
+                    _frame("portfolio_optimize", json.dumps(result, default=str)),
+                    data=result,
+                )
+            except Exception as exc:
+                return self._fail(f"portfolio_optimize failed: {exc}")
+
+        return _make_tool(
+            "portfolio_optimize",
+            "Pick high-value actions under a budget. Args: actions (list of "
+            "{id, value, group, ...}), mode (greedy|pareto), budget, valueAxis?, "
+            "objectives? ([['value','max'],['risk','min']]), perGroupCap?, reserved?.",
+            invoke,
+            _object_schema(
+                {
+                    "actions": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "Scored candidate actions, each with an id and numeric objectives.",
+                    },
+                    "mode": {"type": "string", "enum": ["greedy", "pareto"], "default": "greedy"},
+                    "budget": {"type": "integer", "minimum": 1, "default": 12},
+                    "valueAxis": {"type": "string", "default": "value"},
+                    "objectives": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "[key, 'max'|'min'].",
+                        },
+                    },
+                    "perGroupCap": {"type": "integer", "minimum": 1, "default": 1},
+                    "groupCol": {"type": "string", "default": "group"},
+                    "reserved": {"type": "array", "items": {"type": "string"}},
+                },
+                required=("actions",),
+            ),
+        )
+
+    def propose_decision(self) -> Tool:
+        """Record a high-impact recommendation in the approval governance store."""
+
+        async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
+            try:
+                from demos.analytics.src.analytics.decision_store import DecisionStore
+
+                store = DecisionStore(_decision_store_path())
+                entry = store.record(
+                    unit_id=arguments.get("unitId", ""),
+                    action_type=arguments.get("actionType", ""),
+                    status=arguments.get("status", "pending"),
+                    comment=arguments.get("comment", ""),
+                    by=arguments.get("by", "agent"),
+                )
+                if arguments.get("notifyHost"):
+                    store.notify_host(entry.unit_id, entry.action_type,
+                                      note=arguments.get("comment", ""))
+                return self._ok(
+                    _frame("propose_decision", json.dumps(entry.to_dict(), default=str)),
+                    data=entry.to_dict(),
+                )
+            except Exception as exc:
+                return self._fail(f"propose_decision failed: {exc}")
+
+        return _make_tool(
+            "propose_decision",
+            "Log a recommendation into the approval store (pending/accepted/rejected/"
+            "deferred). Args: unitId, actionType, status?, comment?, by?, notifyHost?.",
+            invoke,
+            _object_schema(
+                {
+                    "unitId": {"type": "string", "description": "Entity the action applies to."},
+                    "actionType": {"type": "string", "description": "Action identifier."},
+                    "status": {"type": "string", "enum": ["pending", "accepted", "rejected", "deferred"], "default": "pending"},
+                    "comment": {"type": "string"},
+                    "by": {"type": "string", "default": "agent"},
+                    "notifyHost": {"type": "boolean", "default": False},
+                },
+                required=("unitId", "actionType"),
+            ),
+        )
+
+
+    def freshness(self) -> Tool:
+        """Report data freshness / lineage for every table (P1 defensibility)."""
+
+        async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
+            try:
+                from demos.analytics.src.analytics.freshness import freshness
+
+                rep = freshness(self.source, self.model)
+                return self._ok(
+                    _frame("freshness", json.dumps(rep.to_dict(), default=str)),
+                    data=rep.to_dict(),
+                )
+            except Exception as exc:
+                return self._fail(f"freshness failed: {exc}")
+
+        return _make_tool(
+            "freshness",
+            "Max event date, row count, and staleness per table. Args: none.",
+            invoke,
+            _object_schema({}),
+        )
+
+    def reconcile(self) -> Tool:
+        """Reconcile a computed metric against a declared source-of-truth (P2)."""
+
+        async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
+            try:
+                from demos.analytics.src.analytics.reconcile import reconcile
+
+                res = reconcile(
+                    self.source, self.model,
+                    metric=arguments.get("metric", ""),
+                    expected=float(arguments.get("expected", 0.0)),
+                    tolerance=float(arguments.get("tolerance", 0.01)),
+                    where=arguments.get("where"),
+                )
+                return self._ok(
+                    _frame("reconcile", json.dumps(res.to_dict(), default=str)),
+                    data=res.to_dict(),
+                )
+            except Exception as exc:
+                return self._fail(f"reconcile failed: {exc}")
+
+        return _make_tool(
+            "reconcile",
+            "Compare a computed aggregate to an expected value. Args: metric, "
+            "expected, tolerance?, where?.",
+            invoke,
+            _object_schema(
+                {
+                    "metric": {"type": "string", "description": "Metric ref to reconcile."},
+                    "expected": {"type": "number", "description": "Declared source-of-truth value."},
+                    "tolerance": {"type": "number", "minimum": 0, "default": 0.01},
+                    "where": {"type": "string", "description": "Optional SQL WHERE on the metric table."},
+                },
+                required=("metric", "expected"),
+            ),
+        )
+
+
+    def verify_query(self) -> Tool:
+        """Pre-flight semantic check that a query is answerable (cross-cut)."""
+
+        async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
+            try:
+                from demos.analytics.src.analytics.verify import verify
+
+                res = verify(
+                    self.model,
+                    metrics=arguments.get("metrics", []),
+                    dimensions=arguments.get("dimensions", []),
+                    filters=arguments.get("filters", []),
+                )
+                return self._ok(
+                    _frame("verify_query", json.dumps(res.to_dict(), default=str)),
+                    data=res.to_dict(),
+                )
+            except Exception as exc:
+                return self._fail(f"verify_query failed: {exc}")
+
+        return _make_tool(
+            "verify_query",
+            "Check metrics/dimensions/filters exist and are answerable before running. "
+            "Args: metrics, dimensions?, filters?",
+            invoke,
+            _object_schema(
+                {
+                    "metrics": _string_array("Metric refs to validate."),
+                    "dimensions": _string_array("Dimension refs to validate."),
+                    "filters": _filter_schema(),
+                },
+                required=("metrics",),
+            ),
+        )
+
+
+def _decision_store_path() -> Any:
+    from pathlib import Path
+
+    return Path(os.getenv("ANALYTICS_DECISION_STORE", "decisions.json"))
+
+
+def _min_trust(a: str, b: str) -> str:
+    from demos.analytics.src.analytics.trust import TIERS
+
+    return a if TIERS.index(a) <= TIERS.index(b) else b
 
 
 def _binseg(vals: Any, min_size: int, max_breaks: int) -> list[int]:

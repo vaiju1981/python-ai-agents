@@ -15,6 +15,7 @@ user text, so the interpolation here is safe.
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any
 
@@ -33,6 +34,11 @@ from demos.analytics.src.analytics.toolset import (
 from python_ai_agents.core.tool import Tool, ToolResult
 
 _MIN_ROWS = 20
+# Row-based ML (random forests, k-means, isolation forest) must materialize rows
+# into memory. To keep that bounded on large tables we default to a generous
+# reservoir-sample cap; callers can override per-instance via ``max_train_rows``
+# or globally via ``ANALYTICS_MAX_TRAIN_ROWS`` (0 = no cap / full table).
+_DEFAULT_MAX_TRAIN_ROWS = int(os.getenv("ANALYTICS_MAX_TRAIN_ROWS", "200000")) or None
 # Drift detection: PSI (population stability index) is the primary signal,
 # with a two-sample KS test and a standardized mean-shift fallback. PSI
 # convention: <0.1 stable, 0.1-0.25 moderate, >0.25 significant drift.
@@ -67,9 +73,50 @@ class ModelsToolset:
         self.model_ttl = model_ttl
         # None = train on the full table (the default). A positive value caps rows
         # (reservoir sample) so the user can trade accuracy for speed on big data.
-        self.max_train_rows = max_train_rows
+        self.max_train_rows = max_train_rows if max_train_rows is not None else _DEFAULT_MAX_TRAIN_ROWS
 
     # -- tool registry --------------------------------------------------------
+
+    def _ok(
+        self,
+        name: str,
+        obj: dict[str, Any],
+        data: Any = None,
+        *,
+        n: int | None = None,
+        coverage: float | None = None,
+        gates: dict[str, bool] | None = None,
+        trust: dict[str, Any] | None = None,
+    ) -> ToolResult:
+        """Wrap a predictive/causal result with a provenance envelope + trust grade.
+
+        Mirrors ``AnalyticsToolset._ok`` so every answer (descriptive *or*
+        predictive) is defensible: it carries where/how it was produced and how
+        much to trust it. ``n`` is inferred from common sample-size keys when not
+        given explicitly.
+        """
+        from demos.analytics.src.analytics.provenance import build_envelope
+
+        if n is None:
+            for k in ("n", "n_rows", "n_scored", "history_periods"):
+                v = obj.get(k)
+                if isinstance(v, (int, float)):
+                    n = int(v)
+                    break
+        if trust is None and (n is not None or coverage is not None or gates):
+            from demos.analytics.src.analytics.trust import grade
+
+            trust = grade(coverage=coverage, n=n, gates=gates).to_dict()
+
+        extra: dict[str, Any] = {}
+        if trust is not None:
+            # Embed trust in the JSON body (machine-readable) and the provenance
+            # envelope, rather than appending prose that would break parsers.
+            obj = {**obj, "trust": trust}
+            extra["trust"] = trust
+        content = _frame(name, json.dumps(obj, default=str)[:MAX_RESULT_CHARS])
+        env = build_envelope(self.source, **extra)
+        return ToolResult.ok(content, data=data, provenance=env.to_dict())
 
     def all_tools(self) -> list[Tool]:
         return [
@@ -156,7 +203,7 @@ class ModelsToolset:
     def build_model(self) -> Tool:
         async def impl(args: dict[str, Any], ctx: Any) -> ToolResult:
             _, _, _, _, meta, cached, trained_at = self._train_or_load(args)
-            return _ok("build_model", {**meta, "cached": cached, "trained_at": trained_at})
+            return self._ok("build_model", {**meta, "cached": cached, "trained_at": trained_at})
 
         return _make_tool(
             "build_model",
@@ -207,7 +254,7 @@ class ModelsToolset:
                     "max": round(float(preds.max()), 4),
                 }
 
-            return _ok(
+            return self._ok(
                 "predict",
                 {
                     "target": t_col,
@@ -324,7 +371,7 @@ class ModelsToolset:
                 }
                 for i, v in enumerate(fc)
             ]
-            return _ok(
+            return self._ok(
                 "forecast",
                 {
                     "metric": m_col,
@@ -364,30 +411,53 @@ class ModelsToolset:
             if g_table != m_table:
                 return ToolResult.failed("metric and groupColumn must be in the same table")
             a, b = str(args["groupA"]), str(args["groupB"])
-            df = self._frame(m_table, [m_col, g_col])
-            va = df[df[g_col].astype(str) == a][m_col].apply(_to_float).dropna().values
-            vb = df[df[g_col].astype(str) == b][m_col].apply(_to_float).dropna().values
-            if len(va) < 2 or len(vb) < 2:
-                return ToolResult.failed(f"need >= 2 rows per group (A={len(va)}, B={len(vb)})")
 
-            t, p = stats.ttest_ind(va, vb, equal_var=False)  # Welch's
-            ma, mb = float(va.mean()), float(vb.mean())
-            pooled = float(np.sqrt((va.var(ddof=1) + vb.var(ddof=1)) / 2)) or 1.0
-            return _ok(
+            # SQL-native: compute per-group n / mean / sample-variance in the
+            # engine instead of pulling every row into pandas. Welch's t-test and
+            # Cohen's d are then derived from these aggregates.
+            qv = sql_qcol(m_table, m_col)
+            qg = sql_qcol(m_table, g_col)
+            sql = (
+                f"SELECT CAST({qg} AS VARCHAR) AS grp, COUNT({qv}) AS n, "
+                f"AVG(CAST({qv} AS DOUBLE)) AS mean, "
+                f"var_samp(CAST({qv} AS DOUBLE)) AS var "
+                f"FROM {sql_quote(m_table)} "
+                f"WHERE {qv} IS NOT NULL AND CAST({qg} AS VARCHAR) IN "
+                f"('{sql_literal(a)}', '{sql_literal(b)}') GROUP BY grp"
+            )
+            by = {str(r["grp"]): r for r in self.source.native_query(sql)}
+            ra, rb = by.get(a), by.get(b)
+            nA = int(ra["n"]) if ra else 0
+            nB = int(rb["n"]) if rb else 0
+            if nA < 2 or nB < 2:
+                return ToolResult.failed(f"need >= 2 rows per group (A={nA}, B={nB})")
+
+            ma, mb = float(ra["mean"]), float(rb["mean"])
+            vA = float(ra["var"] or 0.0)
+            vB = float(rb["var"] or 0.0)
+            se = np.sqrt(vA / nA + vB / nB)
+            t = (ma - mb) / se if se > 0 else 0.0
+            # Welch–Satterthwaite degrees of freedom.
+            denom = (vA / nA) ** 2 / max(nA - 1, 1) + (vB / nB) ** 2 / max(nB - 1, 1)
+            dof = ((vA / nA + vB / nB) ** 2 / denom) if denom > 0 else float(nA + nB - 2)
+            p = float(2 * stats.t.sf(abs(t), dof)) if se > 0 else 1.0
+            pooled = float(np.sqrt((vA + vB) / 2)) or 1.0
+            return self._ok(
                 "ab_test",
                 {
                     "metric": m_col,
                     "groupA": a,
                     "groupB": b,
-                    "nA": int(len(va)),
-                    "nB": int(len(vb)),
+                    "nA": nA,
+                    "nB": nB,
                     "meanA": round(ma, 4),
                     "meanB": round(mb, 4),
                     "difference": round(ma - mb, 4),
                     "welch_t": round(float(t), 3),
-                    "p_value": round(float(p), 4),
+                    "p_value": round(p, 4),
                     "cohens_d": round((ma - mb) / pooled, 3),
                     "verdict": "significant at p<0.05" if p < 0.05 else "not significant (p>=0.05)",
+                    "method": "Welch's t-test from SQL group aggregates (no row materialization)",
                 },
             )
 
@@ -429,7 +499,7 @@ class ModelsToolset:
             xd = sm.add_constant(df[[tr_col, *control_cols]])
             fit = sm.OLS(df[t_col], xd).fit()
             ci = fit.conf_int().loc[tr_col]
-            return _ok(
+            return self._ok(
                 "causal_effect",
                 {
                     "target": t_col,
@@ -499,7 +569,7 @@ class ModelsToolset:
             top_decile = up[order[: max(1, len(up) // 10)]]
             corr = np.corrcoef(np.c_[df[pcols].values, up].T)[-1, :-1]
             drivers = _importances(pcols, np.abs(corr))
-            return _ok(
+            return self._ok(
                 "uplift",
                 {
                     "target": t_col,
@@ -554,7 +624,7 @@ class ModelsToolset:
             labels = KMeans(n_clusters=k, n_init=10, random_state=0).fit_predict(xs)
             sizes = {int(c): int(n) for c, n in zip(*_unique_counts(labels), strict=False)}
             sil = float(silhouette_score(xs, labels)) if k < len(df) else 0.0
-            return _ok(
+            return self._ok(
                 "cluster",
                 {
                     "columns": cols,
@@ -603,7 +673,7 @@ class ModelsToolset:
             flags = iso.fit_predict(df[cols].values)
             anomalies = df[flags == -1]
             sample = anomalies.head(10).to_dict("records")
-            return _ok(
+            return self._ok(
                 "anomaly_detection",
                 {
                     "columns": cols,

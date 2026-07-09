@@ -114,21 +114,55 @@ def feature_frame_sql(
     tree = JoinTree.connect(model, tables, {target_table}, root=target_table)
 
     from_clause = sql_quote(tree.root)
+    aliases: dict[str, str] = {}
     for edge in tree.edges:
         rel = edge.relationship
-        if edge.parent_is_from:
+        # A many-to-many relationship would fan the target row out if joined
+        # directly. Pre-aggregate the child to its join-key grain (one row per
+        # key) before joining so the target keeps exactly one row per match.
+        if rel.cardinality == "many_to_many":
+            if edge.parent_is_from:
+                key_cols = list(rel.from_columns)
+                child = rel.to_table
+                child_key = list(rel.to_columns)
+            else:
+                key_cols = list(rel.to_columns)
+                child = rel.from_table
+                child_key = list(rel.from_columns)
+            child_col_list = [c for (tbl, c) in columns if tbl == child]
+            group_cols = ", ".join(sql_qcol(child, ck) for ck in child_key)
+            select_parts = [group_cols]
+            for c in child_col_list:
+                if c in child_key:
+                    continue
+                select_parts.append(f"MIN({sql_qcol(child, c)}) AS {sql_quote(c)}")
+            child_sql = (
+                f"SELECT {', '.join(select_parts)} FROM {sql_quote(child)} "
+                f"GROUP BY {group_cols}"
+            )
+            alias = f"{child}__mm"
             on_parts = " AND ".join(
-                f"{sql_qcol(rel.from_table, fc)} = {sql_qcol(rel.to_table, tc)}"
+                f"{sql_qcol(rel.from_table, fc)} = {sql_quote(alias)}.{sql_quote(tc)}"
+                if edge.parent_is_from
+                else f"{sql_qcol(rel.to_table, tc)} = {sql_quote(alias)}.{sql_quote(fc)}"
                 for fc, tc in zip(rel.from_columns, rel.to_columns, strict=False)
             )
+            from_clause += f" JOIN ({child_sql}) AS {sql_quote(alias)} ON {on_parts}"
+            aliases[child] = alias
         else:
-            on_parts = " AND ".join(
-                f"{sql_qcol(rel.to_table, tc)} = {sql_qcol(rel.from_table, fc)}"
-                for fc, tc in zip(rel.from_columns, rel.to_columns, strict=False)
-            )
-        from_clause += f" JOIN {sql_quote(edge.child)} ON {on_parts}"
+            if edge.parent_is_from:
+                on_parts = " AND ".join(
+                    f"{sql_qcol(rel.from_table, fc)} = {sql_qcol(rel.to_table, tc)}"
+                    for fc, tc in zip(rel.from_columns, rel.to_columns, strict=False)
+                )
+            else:
+                on_parts = " AND ".join(
+                    f"{sql_qcol(rel.to_table, tc)} = {sql_qcol(rel.from_table, fc)}"
+                    for fc, tc in zip(rel.from_columns, rel.to_columns, strict=False)
+                )
+            from_clause += f" JOIN {sql_quote(edge.child)} ON {on_parts}"
 
-    select = ", ".join(sql_qcol(t, c) for (t, c) in columns)
+    select = ", ".join(sql_qcol(aliases.get(t, t), c) for (t, c) in columns)
     return f"SELECT {select} FROM {from_clause}".strip()
 
 

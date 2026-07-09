@@ -27,6 +27,7 @@ class Metric:
     table: str
     column: str
     aggregation: str
+    role: ColumnRole = ColumnRole.UNKNOWN
 
     @property
     def ref(self) -> str:
@@ -37,10 +38,24 @@ class Metric:
 class Dimension:
     table: str
     column: str
+    role: ColumnRole = ColumnRole.DIMENSION
 
     @property
     def ref(self) -> str:
         return f"{self.table}.{self.column}"
+
+
+@dataclass(frozen=True, slots=True)
+class ModelColumn:
+    """Every column in the dataset with its resolved semantic role."""
+
+    table: str
+    name: str
+    role: ColumnRole
+
+    @property
+    def ref(self) -> str:
+        return f"{self.table}.{self.name}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +85,7 @@ class SemanticModel:
     entity_keys: tuple[str, ...]
     time_columns: tuple[TimeColumn, ...]
     relationships: tuple[Relationship, ...]
+    columns: tuple[ModelColumn, ...] = ()
 
     @classmethod
     def from_profile(cls, profile: DatasetProfile) -> SemanticModel:
@@ -78,21 +94,37 @@ class SemanticModel:
         dimensions: list[Dimension] = []
         entity_keys: list[str] = []
         time_columns: list[TimeColumn] = []
+        columns: list[ModelColumn] = []
 
         for table in profile.tables:
             for col in table.columns:
+                columns.append(ModelColumn(table=table.name, name=col.name, role=col.role))
                 if col.role == ColumnRole.MEASURE_ADDITIVE:
-                    metrics.append(Metric(table=table.name, column=col.name, aggregation="sum"))
+                    metrics.append(
+                        Metric(
+                            table=table.name, column=col.name,
+                            aggregation="sum", role=col.role,
+                        )
+                    )
                 elif col.role == ColumnRole.MEASURE_RATIO:
-                    metrics.append(Metric(table=table.name, column=col.name, aggregation="avg"))
+                    metrics.append(
+                        Metric(
+                            table=table.name, column=col.name,
+                            aggregation="avg", role=col.role,
+                        )
+                    )
                 elif col.role in (ColumnRole.DATE, ColumnRole.TIMESTAMP):
-                    dimensions.append(Dimension(table=table.name, column=col.name))
+                    dimensions.append(
+                        Dimension(table=table.name, column=col.name, role=col.role)
+                    )
                     encoding = _encoding_of(col, stats.get(f"{table.name}.{col.name}"))
                     time_columns.append(
                         TimeColumn(table=table.name, column=col.name, encoding=encoding)
                     )
                 elif col.role in (ColumnRole.DIMENSION, ColumnRole.BOOLEAN):
-                    dimensions.append(Dimension(table=table.name, column=col.name))
+                    dimensions.append(
+                        Dimension(table=table.name, column=col.name, role=col.role)
+                    )
                 elif col.role == ColumnRole.IDENTIFIER:
                     entity_keys.append(f"{table.name}.{col.name}")
 
@@ -102,6 +134,7 @@ class SemanticModel:
             entity_keys=tuple(entity_keys),
             time_columns=tuple(time_columns),
             relationships=profile.relationships,
+            columns=tuple(columns),
         )
 
     def catalog_json(

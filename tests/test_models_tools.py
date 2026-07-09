@@ -74,6 +74,40 @@ def test_ab_test_reports_significance(toolset):
     assert out["nA"] > 0 and out["nB"] > 0
 
 
+def test_ab_test_sql_native_matches_scipy(tmp_path):
+    """SQL-native ab_test (group aggregates) matches a direct scipy Welch t-test."""
+    from scipy import stats
+
+    rng = np.random.default_rng(7)
+    a_vals = rng.normal(100, 15, size=120)
+    b_vals = rng.normal(112, 15, size=140)
+    lines = ["grp,val"]
+    for v in a_vals:
+        lines.append(f"A,{round(float(v), 4)}")
+    for v in b_vals:
+        lines.append(f"B,{round(float(v), 4)}")
+    csv = tmp_path / "ab.csv"
+    csv.write_text("\n".join(lines) + "\n")
+
+    src = CsvSource(named_csvs={"ab": csv})
+    semantic = SemanticModel.from_profile(profile_dataset(src))
+    tools = ModelsToolset(src, semantic)
+    out = _call(
+        tools.ab_test(),
+        {"metric": "val", "groupColumn": "grp", "groupA": "A", "groupB": "B"},
+    )
+    src.close()
+
+    # Recompute from the raw values with scipy and compare.
+    a_round = np.round(a_vals, 4)
+    b_round = np.round(b_vals, 4)
+    t_ref, p_ref = stats.ttest_ind(a_round, b_round, equal_var=False)
+    assert out["nA"] == len(a_vals) and out["nB"] == len(b_vals)
+    assert out["welch_t"] == pytest.approx(float(t_ref), abs=1e-2)
+    assert out["p_value"] == pytest.approx(float(p_ref), abs=1e-3)
+    assert "no row materialization" in out["method"]
+
+
 def test_causal_effect_has_ci_and_caveat(toolset):
     out = _call(
         toolset.causal_effect(),
@@ -104,6 +138,23 @@ def test_all_tools_are_read_only(toolset):
 
     for tool in toolset.all_tools():
         assert tool.spec.effect == ToolEffect.READ_ONLY
+
+
+def test_predictive_answers_carry_provenance_and_trust(toolset):
+    """P0: predictive/causal answers are defensible (provenance + trust)."""
+
+    async def run():
+        return await toolset.build_model().invoke(
+            {"target": "revenue"}, RequestContext.ephemeral()
+        )
+
+    r = anyio.run(run)
+    assert not r.error, r.content
+    assert r.provenance is not None
+    assert set(["datasetFingerprint", "generatedAt", "engineVersion"]) <= set(r.provenance)
+    assert r.provenance["trust"]["tier"] in ("TRUSTED", "DIRECTIONAL", "INSUFFICIENT")
+    body = json.loads(r.content.split("\n", 1)[1])
+    assert body["trust"]["tier"] == r.provenance["trust"]["tier"]
 
 
 def test_build_model_caches_then_retrains_on_request(tmp_path):

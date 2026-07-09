@@ -155,6 +155,81 @@ class SqliteAuditStore(NoopAgentObserver):
     def close(self) -> None:
         return None
 
+    # --- P3 feedback loop: capture recommendation outcomes + tune trust ---
+    def record_outcome(
+        self,
+        tool: str,
+        outcome: str,
+        recommendation_id: str | None = None,
+        trust_tier: str | None = None,
+        correct: bool | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        """Record whether a recommendation was accepted/rejected and if it was right.
+
+        ``outcome`` is one of accepted / rejected / acted_on. ``correct`` (True/False)
+        is the ground-truth label supplied later (e.g. the recommendation's
+        predicted effect matched reality). Feeds ``tune_trust_thresholds``.
+        """
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO recommendation_outcomes (
+                        id, timestamp, session_id, tool, recommendation_id,
+                        trust_tier, outcome, correct
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid4()),
+                        datetime.now(timezone.utc).isoformat(),
+                        session_id or self.session_id or "unknown",
+                        tool,
+                        recommendation_id,
+                        trust_tier,
+                        outcome,
+                        int(correct) if correct is not None else None,
+                    ),
+                )
+        except Exception:
+            return None
+
+    def tune_trust_thresholds(self) -> dict[str, Any]:
+        """Suggest trust-threshold adjustments from recorded outcomes.
+
+        If TRUSTED/DIRECTIONAL recommendations were later marked *wrong* more
+        than ``max_false_rate`` of the time, recommend raising the bar
+        (``raise``); if INSUFFICIENT/abstained recommendations were later marked
+        *correct*, recommend lowering it (``lower``). Otherwise ``keep``.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT trust_tier, correct FROM recommendation_outcomes "
+                "WHERE correct IS NOT NULL"
+            ).fetchall()
+        if not rows:
+            return {"action": "keep", "reason": "no labeled outcomes yet", "sample": 0}
+        high_tier = [r for r in rows if r[0] in ("TRUSTED", "DIRECTIONAL")]
+        low_tier = [r for r in rows if r[0] in ("INSUFFICIENT",)]
+        max_false_rate = 0.20
+        high_false = sum(1 for r in high_tier if r[1] == 0)
+        high_rate = high_false / len(high_tier) if high_tier else 0.0
+        low_correct = sum(1 for r in low_tier if r[1] == 1)
+        low_rate = low_correct / len(low_tier) if low_tier else 0.0
+        if high_rate > max_false_rate:
+            return {
+                "action": "raise",
+                "reason": f"TRUSTED/DIRECTIONAL wrong {high_rate:.0%} of the time",
+                "highTierFalseRate": round(high_rate, 3),
+            }
+        if low_rate > 0.5:
+            return {
+                "action": "lower",
+                "reason": f"INSUFFICIENT later correct {low_rate:.0%} of the time",
+                "lowTierCorrectRate": round(low_rate, 3),
+            }
+        return {"action": "keep", "reason": "false rates within tolerance"}
+
     # --- internals ---
     def _initialize(self) -> None:
         with self._connect() as conn:
@@ -197,6 +272,23 @@ class SqliteAuditStore(NoopAgentObserver):
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tool_calls_ts ON tool_calls(timestamp)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS recommendation_outcomes (
+                    id TEXT PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    session_id TEXT,
+                    tool TEXT NOT NULL,
+                    recommendation_id TEXT,
+                    trust_tier TEXT,
+                    outcome TEXT NOT NULL,
+                    correct INTEGER
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_outcomes_tool ON recommendation_outcomes(tool)"
             )
 
     def _connect(self) -> sqlite3.Connection:

@@ -30,14 +30,15 @@ class ToolResult:
     content: str
     error: bool = False
     data: Any = None  # optional structured payload (e.g. rows) for UIs; never sent to the model
+    provenance: dict[str, Any] | None = None  # audit envelope: sql, dataset fingerprint, row count, timestamp, engine version
 
     @classmethod
-    def ok(cls, content: str, data: Any = None) -> ToolResult:
-        return cls(content=content, data=data)
+    def ok(cls, content: str, data: Any = None, provenance: dict[str, Any] | None = None) -> ToolResult:
+        return cls(content=content, data=data, provenance=provenance)
 
     @classmethod
-    def failed(cls, content: str) -> ToolResult:
-        return cls(content=content, error=True)
+    def failed(cls, content: str, provenance: dict[str, Any] | None = None) -> ToolResult:
+        return cls(content=content, error=True, provenance=provenance)
 
 
 class Tool(Protocol):

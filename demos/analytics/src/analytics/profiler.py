@@ -169,6 +169,8 @@ def profile_dataset(
             from demos.analytics.src.analytics.semantic_roles import classify_role
 
             role = classify_role(cp)
+            if catalog is not None:
+                role = catalog.role_for(table.name, col.name, role)
             typed_cols.append(
                 ColumnSchema(name=col.name, physical_type=col.physical_type, role=role)
             )
