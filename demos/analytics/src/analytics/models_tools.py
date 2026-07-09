@@ -20,7 +20,7 @@ from typing import Any
 
 from demos.analytics.src.analytics.data_source import DataSource, sql_literal, sql_qcol, sql_quote
 from demos.analytics.src.analytics.model_store import ModelRecord, ModelStore, model_key
-from demos.analytics.src.analytics.query_planner import OPERATORS
+from demos.analytics.src.analytics.query_planner import OPERATORS, feature_frame_sql
 from demos.analytics.src.analytics.semantic_model import SemanticModel
 from demos.analytics.src.analytics.toolset import (
     MAX_RESULT_CHARS,
@@ -33,9 +33,12 @@ from demos.analytics.src.analytics.toolset import (
 from python_ai_agents.core.tool import Tool, ToolResult
 
 _MIN_ROWS = 20
-# Drift = standardized mean shift of a feature vs its training distribution.
-# ponytail: mean-shift heuristic; upgrade to PSI/KS tests if this proves too coarse.
-_DRIFT_THRESHOLD = 0.5
+# Drift detection: PSI (population stability index) is the primary signal,
+# with a two-sample KS test and a standardized mean-shift fallback. PSI
+# convention: <0.1 stable, 0.1-0.25 moderate, >0.25 significant drift.
+_PSI_THRESHOLD = 0.25
+_MEAN_SHIFT_TO_PSI = 1.0  # keeps the fallback mean-shift score on a comparable scale
+_MEAN_SHIFT_DRIFT = 2.0  # standardized mean-shift magnitude treated as drift
 
 
 class ModelsToolset:
@@ -54,6 +57,12 @@ class ModelsToolset:
         self.source = source
         self.model = model
         self.store = store
+        # Default the dataset signature to a content fingerprint so a changed
+        # dataset invalidates cached models instead of serving stale fits.
+        if not dataset_sig:
+            from demos.analytics.src.analytics.dataset_fingerprint import fingerprint
+
+            dataset_sig = fingerprint(source)
         self.dataset_sig = dataset_sig
         self.model_ttl = model_ttl
         # None = train on the full table (the default). A positive value caps rows
@@ -78,18 +87,27 @@ class ModelsToolset:
 
     def _prepare_model_spec(
         self, args: dict[str, Any]
-    ) -> tuple[str, str, list[str], bool, str, Any]:
-        """Resolve target/predictors, load training data, and compute the model key."""
+    ) -> tuple[str, str, list[tuple[str, str]], list[str], bool, str, Any]:
+        """Resolve target/predictors, load training data, and compute the model key.
+
+        Predictors may live in *related* tables; they are assembled into the
+        target's row grain via discovered relationships (multi-table features),
+        so a model can use attributes from anywhere in the dataset.
+        """
         import pandas as pd
 
         t_table, t_col = self._resolve(args["target"])
-        predictors = args.get("predictors") or self._numeric_columns(t_table, exclude=t_col)
-        pcols = [c for p in predictors for (pt, c) in [self._resolve(p)] if pt == t_table]
-        if not pcols:
-            raise ValueError("no predictors in the target's table")
+        pred_refs = args.get("predictors") or [
+            m.ref for m in self.model.metrics if m.table == t_table and m.column != t_col
+        ]
+        pred_cols = [self._resolve(p) for p in pred_refs]  # list[(table, col)]
+        if not pred_cols:
+            raise ValueError("no predictors available for the target")
 
-        df = self._frame(t_table, [t_col, *dict.fromkeys(pcols)])
-        x = df[pcols].apply(pd.to_numeric, errors="coerce").dropna(axis=1, how="all")
+        df = self._assemble_features(t_table, t_col, pred_cols)
+        x = df[[c for (_t, c) in pred_cols]].apply(pd.to_numeric, errors="coerce").dropna(
+            axis=1, how="all"
+        )
         data = pd.concat([df[t_col], x], axis=1).dropna()
         if len(data) < _MIN_ROWS:
             raise ValueError(f"need {_MIN_ROWS}+ rows to model (got {len(data)})")
@@ -107,32 +125,33 @@ class ModelsToolset:
             predictors=feature_cols,
             algorithm=algo,
         )
-        return t_table, t_col, feature_cols, is_clf, key, data
+        return t_table, t_col, pred_cols, feature_cols, is_clf, key, data
 
     def _train_or_load(
         self, args: dict[str, Any]
-    ) -> tuple[str, str, list[str], Any, dict[str, Any], bool, float]:
+    ) -> tuple[str, str, list[tuple[str, str]], Any, dict[str, Any], bool, float]:
         """Train-once cache: reuse a fresh stored model unless the caller forces a retrain."""
-        t_table, t_col, feature_cols, is_clf, key, data = self._prepare_model_spec(args)
+        t_table, t_col, pred_cols, feature_cols, is_clf, key, data = self._prepare_model_spec(args)
         if self.store is not None and not args.get("retrain", False):
             cached = self.store.get(key, max_age=self.model_ttl)
             if cached is not None:
                 return (
                     t_table,
                     t_col,
-                    feature_cols,
+                    pred_cols,
                     cached.model,
                     dict(cached.metadata),
                     True,
                     cached.trained_at,
                 )
         result, fitted = self._fit(data[t_col], data[feature_cols], feature_cols, is_clf)
+        result["feature_refs"] = [f"{t}.{c}" for (t, c) in pred_cols]
         trained_at = time.time()
         if self.store is not None:
             self.store.put(
                 ModelRecord(key=key, model=fitted, metadata=result, trained_at=trained_at)
             )
-        return t_table, t_col, feature_cols, fitted, result, False, trained_at
+        return t_table, t_col, pred_cols, fitted, result, False, trained_at
 
     def build_model(self) -> Tool:
         async def impl(args: dict[str, Any], ctx: Any) -> ToolResult:
@@ -165,11 +184,10 @@ class ModelsToolset:
 
             # Serving: load the stored model for this spec (training once if absent),
             # then score rows WITHOUT retraining — the train/serve split.
-            t_table, t_col, feature_cols, fitted, meta, cached, trained_at = self._train_or_load(
-                args
-            )
+            t_table, t_col, pred_cols, fitted, meta, cached, trained_at = self._train_or_load(args)
+            feature_cols = [c for (_t, c) in pred_cols]
             filters = list(args.get("filters") or [])
-            score_df = self._frame(t_table, feature_cols, filters=filters)
+            score_df = self._assemble_features(t_table, t_col, pred_cols, filters=filters)
             score_df = score_df.apply(pd.to_numeric, errors="coerce").dropna()
             if score_df.empty:
                 return ToolResult.failed("no rows to score after filters")
@@ -226,9 +244,16 @@ class ModelsToolset:
 
     def _fit(self, y: Any, x: Any, pcols: list[str], is_clf: bool) -> tuple[dict[str, Any], Any]:
         xv = x.astype(float).values
-        # Per-feature training stats travel with the model so `predict` can flag drift.
+        # Per-feature training stats travel with the model so `predict` can flag
+        # drift. We keep mean/std (fast mean-shift) plus decile edges + a value
+        # sample so serving can compute PSI and a KS test against training.
         train_stats = {
-            c: {"mean": round(float(x[c].mean()), 4), "std": round(float(x[c].std(ddof=0)), 4)}
+            c: {
+                "mean": round(float(x[c].mean()), 4),
+                "std": round(float(x[c].std(ddof=0)), 4),
+                "quantiles": _deciles(x[c]),
+                "sample": _value_sample(x[c]),
+            }
             for c in pcols
         }
         if is_clf:
@@ -391,20 +416,17 @@ class ModelsToolset:
 
             t_table, t_col = self._resolve(args["target"])
             tr_table, tr_col = self._resolve(args["treatment"])
-            if tr_table != t_table:
-                return ToolResult.failed("target and treatment must be in the same table")
-            controls = [
-                c
-                for x in (args.get("controls") or [])
-                for (ct, c) in [self._resolve(x)]
-                if ct == t_table
-            ]
-            cols = list(dict.fromkeys([t_col, tr_col, *controls]))
-            df = self._frame(t_table, cols).apply(pd.to_numeric, errors="coerce").dropna()
+            controls = [self._resolve(x) for x in (args.get("controls") or [])]
+            control_cols = [c for (_t, c) in controls]
+            df = (
+                self._assemble_features(t_table, t_col, [(tr_table, tr_col), *controls])
+                .apply(pd.to_numeric, errors="coerce")
+                .dropna()
+            )
             if len(df) < _MIN_ROWS:
                 return ToolResult.failed(f"need {_MIN_ROWS}+ numeric rows (got {len(df)})")
 
-            xd = sm.add_constant(df[[tr_col, *controls]])
+            xd = sm.add_constant(df[[tr_col, *control_cols]])
             fit = sm.OLS(df[t_col], xd).fit()
             ci = fit.conf_int().loc[tr_col]
             return _ok(
@@ -452,17 +474,16 @@ class ModelsToolset:
 
             t_table, t_col = self._resolve(args["target"])
             tr_table, tr_col = self._resolve(args["treatment"])
-            if tr_table != t_table:
-                return ToolResult.failed("target and treatment must be in the same table")
-            preds = args.get("predictors") or self._numeric_columns(t_table, exclude=t_col)
-            pcols = [
-                c for p in preds for (pt, c) in [self._resolve(p)] if pt == t_table and c != tr_col
+            preds = args.get("predictors") or [
+                m.ref for m in self.model.metrics if m.table == t_table and m.column != t_col
             ]
-            if not pcols:
-                return ToolResult.failed("no predictor columns for uplift")
-
-            df = self._frame(t_table, list(dict.fromkeys([t_col, tr_col, *pcols])))
-            df = df.apply(pd.to_numeric, errors="coerce").dropna()
+            pred_pairs = [self._resolve(p) for p in preds]
+            pcols = [c for (_t, c) in pred_pairs]
+            df = (
+                self._assemble_features(t_table, t_col, [(tr_table, tr_col), *pred_pairs])
+                .apply(pd.to_numeric, errors="coerce")
+                .dropna()
+            )
             treated = df[df[tr_col] > df[tr_col].median()]
             control = df[df[tr_col] <= df[tr_col].median()]
             if len(treated) < 10 or len(control) < 10:
@@ -654,6 +675,44 @@ class ModelsToolset:
             sql = f"SELECT * FROM ({sql}) USING SAMPLE {int(cap)} ROWS"
         return pd.DataFrame(self.source.native_query(sql))
 
+    def _assemble_features(
+        self,
+        target_table: str,
+        target_col: str,
+        pred_cols: list[tuple[str, str]],
+        filters: list[dict[str, Any]] | None = None,
+    ) -> Any:
+        """Row-grain feature frame for modeling: join ``target_table`` to related
+        tables (via discovered relationships) and select the target + predictors.
+
+        Unlike ``_frame`` (single table), this assembles predictors that live in
+        *other* tables, so a model can use features from across the dataset.
+        """
+        import pandas as pd
+
+        cols = [(target_table, target_col), *pred_cols]
+        sql = feature_frame_sql(self.model, target_table, cols)
+        if filters:
+            clauses: list[str] = []
+            for f in filters:
+                f_table, f_col = self._resolve(str(f["column"]))
+                if f_table != target_table:
+                    raise ValueError(
+                        f"filter column '{f['column']}' is not in target table '{target_table}'"
+                    )
+                op = str(f["op"])
+                if op not in OPERATORS:
+                    raise ValueError(f"unsupported filter op: {op}")
+                lit = sql_literal(str(f["value"]))
+                clauses.append(f"{sql_qcol(target_table, f_col)} {op} '{lit}'")
+            if clauses:
+                sql += " WHERE " + " AND ".join(clauses)
+        # Honor the user's row cap (reservoir sample) so big data can trade
+        # accuracy for speed; matches the sampling already done in ``_frame``.
+        if self.max_train_rows:
+            sql = f"SELECT * FROM ({sql}) USING SAMPLE {int(self.max_train_rows)} ROWS"
+        return pd.DataFrame(self.source.native_query(sql))
+
     @staticmethod
     def _looks_categorical(series: Any) -> bool:
         if series.dtype == object or str(series.dtype) == "category":
@@ -676,25 +735,55 @@ def _ok(name: str, obj: dict[str, Any], data: Any = None) -> ToolResult:
 
 
 def _drift_check(train_stats: dict[str, Any], df: Any, feature_cols: list[str]) -> dict[str, Any]:
-    """Standardized mean shift of each scoring feature vs its training distribution."""
-    shifts: dict[str, float] = {}
+    """Per-feature distribution drift of scored rows vs the training data.
+
+    Uses PSI (population stability index) over the training deciles as the
+    primary signal, a two-sample KS test where a training value sample is
+    available, and a standardized mean-shift as a fallback. PSI convention:
+    <0.1 stable, 0.1-0.25 moderate, >0.25 significant.
+    """
+    features: dict[str, dict[str, Any]] = {}
+    scores: dict[str, float] = {}
     for col in feature_cols:
         stats = train_stats.get(col)
         if not stats:
             continue
+        col_vals = df[col].dropna()
+        if col_vals.empty:
+            continue
         std = float(stats.get("std") or 0.0) or 1.0
-        shifts[col] = round(abs(float(df[col].mean()) - float(stats["mean"])) / std, 3)
-    if not shifts:
+        mean_shift = round(abs(float(col_vals.mean()) - float(stats["mean"])) / std, 3)
+        entry: dict[str, Any] = {"mean_shift": mean_shift}
+        score = mean_shift / _MEAN_SHIFT_TO_PSI  # comparable scale when PSI absent
+
+        quantiles = stats.get("quantiles")
+        if quantiles:
+            psi = _psi(quantiles, col_vals)
+            entry["psi"] = round(psi, 3)
+            score = psi
+        sample = stats.get("sample")
+        if sample:
+            ks = _ks(sample, col_vals)
+            if ks is not None:
+                entry["ks"] = round(ks, 3)
+        features[col] = entry
+        scores[col] = score
+
+    if not scores:
         return {"checked": False, "note": "no training statistics stored with this model"}
-    worst = max(shifts, key=lambda c: shifts[c])
-    detected = shifts[worst] > _DRIFT_THRESHOLD
+    worst = max(scores, key=lambda c: scores[c])
+    worst_psi = features[worst].get("psi")
+    detected = (worst_psi is not None and worst_psi > _PSI_THRESHOLD) or (
+        worst_psi is None and scores[worst] > _MEAN_SHIFT_DRIFT
+    )
     result: dict[str, Any] = {
         "checked": True,
         "detected": detected,
-        "score": shifts[worst],
-        "threshold": _DRIFT_THRESHOLD,
+        "method": "PSI over training deciles (+ KS, mean-shift)",
+        "score": round(scores[worst], 3),
+        "threshold": _PSI_THRESHOLD,
         "worst_feature": worst,
-        "feature_shift": shifts,
+        "features": features,
     }
     if detected:
         result["recommendation"] = (
@@ -702,6 +791,85 @@ def _drift_check(train_stats: dict[str, Any], df: Any, feature_cols: list[str]) 
             "retrain via build_model(retrain=true)"
         )
     return result
+
+
+def _deciles(series: Any) -> list[float]:
+    """Training decile edges (10 bins → 11 edges) used as PSI/histogram bins."""
+    import numpy as np
+
+    vals = series.dropna().astype(float).values
+    if len(vals) == 0:
+        return []
+    edges = np.quantile(vals, [i / 10 for i in range(11)])
+    # De-duplicate collapsed edges (near-constant features) while staying sorted.
+    out: list[float] = []
+    for e in edges:
+        e = float(e)
+        if not out or e > out[-1]:
+            out.append(e)
+    return out
+
+
+def _value_sample(series: Any, n: int = 500) -> list[float]:
+    import numpy as np
+
+    vals = series.dropna().astype(float).values
+    if len(vals) <= n:
+        return [float(v) for v in vals]
+    rng = np.random.default_rng(0)
+    return [float(v) for v in rng.choice(vals, size=n, replace=False)]
+
+
+def _as_array(series: Any) -> Any:
+    """Coerce a pandas Series or numpy array to a 1-D float array (NaNs dropped)."""
+    import numpy as np
+
+    if hasattr(series, "dropna"):
+        return series.dropna().astype(float).values
+    arr = np.asarray(series, dtype=float)
+    return arr[~np.isnan(arr)]
+
+
+def _psi(edges: list[float], series: Any) -> float:
+    """Population stability index of ``series`` against training bin ``edges``."""
+    import numpy as np
+
+    if len(edges) < 2:
+        return 0.0
+    vals = _as_array(series)
+    if len(vals) == 0:
+        return 0.0
+    bins = np.array(edges, dtype=float)
+    n_bins = len(bins) - 1
+    # Expected mass is uniform across deciles by construction (1/n_bins each).
+    expected = np.full(n_bins, 1.0 / n_bins)
+    counts, _ = np.histogram(vals, bins=bins)
+    # Include out-of-range values in the nearest edge bin.
+    below = int((vals < bins[0]).sum())
+    above = int((vals > bins[-1]).sum())
+    counts = counts.astype(float)
+    counts[0] += below
+    counts[-1] += above
+    actual = counts / max(1, counts.sum())
+    eps = 1e-6
+    actual = np.clip(actual, eps, None)
+    expected = np.clip(expected, eps, None)
+    return float(np.sum((actual - expected) * np.log(actual / expected)))
+
+
+def _ks(train_sample: list[float], series: Any) -> float | None:
+    """Two-sample Kolmogorov-Smirnov statistic (0..1); None if scipy is absent."""
+    try:
+        from scipy import stats as _stats
+    except Exception:
+        return None
+    vals = _as_array(series)
+    if len(vals) == 0 or not train_sample:
+        return None
+    try:
+        return float(_stats.ks_2samp(train_sample, vals).statistic)
+    except Exception:
+        return None
 
 
 def _importances(names: list[str], values: Any) -> list[dict[str, Any]]:

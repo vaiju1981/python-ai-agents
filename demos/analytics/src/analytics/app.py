@@ -19,6 +19,8 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
+from uuid import uuid4
 
 import anyio
 import pandas as pd
@@ -29,6 +31,7 @@ sys.path.insert(0, "src")
 sys.path.insert(0, "demos/analytics/src")
 
 from demos.analytics.src.analytics.agent import create_agent  # noqa: E402
+from demos.analytics.src.analytics.audit_store import SqliteAuditStore  # noqa: E402
 from demos.analytics.src.analytics.charts import ChartSpec, choose_chart  # noqa: E402
 from demos.analytics.src.analytics.csv_source import CsvSource  # noqa: E402
 from demos.analytics.src.analytics.insights import generate_insights  # noqa: E402
@@ -37,7 +40,6 @@ from demos.analytics.src.analytics.models import from_env as model_from_env  # n
 from demos.analytics.src.analytics.profiler import profile_dataset  # noqa: E402
 from demos.analytics.src.analytics.schema_builder import refine_profile_with_llm  # noqa: E402
 from demos.analytics.src.analytics.semantic_model import SemanticModel  # noqa: E402
-from demos.analytics.src.analytics.toolset import AnalyticsToolset  # noqa: E402
 from python_ai_agents import AgentRequest, NoopAgentObserver, RequestContext  # noqa: E402
 from python_ai_agents.core.tool import ToolResult  # noqa: E402
 
@@ -76,26 +78,6 @@ class _RowCapture(NoopAgentObserver):
         rows = _extract_rows(result.data if result.data is not None else result.content)
         if rows:
             self.rows = rows
-
-
-class _AuditObserver(NoopAgentObserver):
-    """Records every tool call (name, latency, success, rows) for observability."""
-
-    def __init__(self) -> None:
-        self.records: list[dict] = []
-
-    async def on_tool_result(self, tool_name: str, result: ToolResult, latency: object) -> None:
-        rows = result.data
-        n_rows = len(rows) if isinstance(rows, list) else None
-        self.records.append(
-            {
-                "tool": tool_name,
-                "ok": not result.error,
-                "latency_s": round(float(latency), 3) if latency is not None else None,
-                "rows": n_rows,
-                "error": (result.content[:200] if result.error else ""),
-            }
-        )
 
 
 def _extract_rows(payload: object) -> list[dict] | None:
@@ -153,6 +135,7 @@ def _load_dataset(named_csvs: dict[str, Path], sig: tuple, tmp_dir: Path, *, ref
     st.session_state.update(
         data_sig=sig,
         tmp_dir=tmp_dir,
+        session_id=str(uuid4()),
         source=source,
         profile=profile,
         semantic=semantic,
@@ -173,7 +156,8 @@ def _ensure_agent(provider: str, model_name: str, max_train_rows: int | None) ->
         return
     capture = _RowCapture()
     st.session_state.capture = capture
-    audit = _AuditObserver()
+    # Durable, SQLite-backed audit store (survives restarts, scalable, queryable).
+    audit = SqliteAuditStore(Path(st.session_state.tmp_dir) / "audit.db")
     st.session_state.audit = audit
     store = FileModelStore(Path(st.session_state.tmp_dir) / "models")
     st.session_state.agent = create_agent(
@@ -184,8 +168,32 @@ def _ensure_agent(provider: str, model_name: str, max_train_rows: int | None) ->
         model_store=store,
         dataset_sig=str(st.session_state.data_sig),
         max_train_rows=max_train_rows,
+        audit_sink=audit,
     )
     st.session_state.model_sig = model_sig
+
+
+def _run_tool_audited(
+    tool_name: str, arguments: dict[str, Any], *, input_hint: str = ""
+) -> ToolResult:
+    """Drive a specific tool through the agent's governed + audited pipeline.
+
+    Used by the SQL/guided/compare panels so every execution — not just chat —
+    flows through the same validation, approval, read-only guard, timeout, result
+    framing, and audit/observer notification as an in-turn tool call.
+    """
+    audit = st.session_state.get("audit")
+    if audit is not None:
+        audit.session_id = st.session_state.session_id
+    request = AgentRequest(
+        input=input_hint,
+        context=RequestContext.session(st.session_state.session_id),
+    )
+
+    async def _run() -> ToolResult:
+        return await st.session_state.agent.run_tool(tool_name, arguments, request)
+
+    return anyio.run(_run)
 
 
 def main() -> None:
@@ -274,7 +282,6 @@ def main() -> None:
     _ensure_agent(provider, model_name, int(max_train_rows) or None)
     profile = st.session_state.profile
     semantic = st.session_state.semantic
-    source = st.session_state.source
 
     tab_insights, tab_chat, tab_profile, tab_sql, tab_audit = st.tabs(
         ["Insights", "Chat", "Profile", "SQL", "Audit"]
@@ -302,6 +309,8 @@ def main() -> None:
             with st.chat_message("assistant"), st.spinner("Analyzing..."):
                 capture = st.session_state.capture
                 capture.rows = None
+                audit = st.session_state.audit
+                audit.session_id = st.session_state.session_id
                 try:
                     response = anyio.run(st.session_state.agent.run, AgentRequest.ephemeral(prompt))
                     answer = response.output
@@ -350,8 +359,11 @@ def main() -> None:
         )
         if st.button("Run"):
             try:
-                rows = source.native_query_with_limit(sql, 500)
-                if rows:
+                result = _run_tool_audited("run_sql", {"sql": sql}, input_hint="SQL tab")
+                if result.error:
+                    st.error(result.content)
+                elif result.data:
+                    rows = result.data
                     st.dataframe(pd.DataFrame(rows), use_container_width=True)
                     _render_chart(choose_chart(rows), rows)
                 else:
@@ -375,12 +387,7 @@ def main() -> None:
                         "dimensions": [d.strip() for d in g_dims.split(",") if d.strip()],
                         "derivedMetrics": derived,
                     }
-                    tool = AnalyticsToolset(source, semantic).run_query()
-
-                    async def _run():
-                        return await tool.invoke(args, RequestContext.ephemeral())
-
-                    result = anyio.run(_run)
+                    result = _run_tool_audited("run_query", args, input_hint="guided query")
                     if result.error:
                         st.error(result.content)
                     elif result.data:
@@ -407,12 +414,7 @@ def main() -> None:
                         "lastDays": int(c_days),
                         "dimensions": [d.strip() for d in c_dims.split(",") if d.strip()],
                     }
-                    tool = AnalyticsToolset(source, semantic).compare()
-
-                    async def _run_cmp():
-                        return await tool.invoke(args, RequestContext.ephemeral())
-
-                    result = anyio.run(_run_cmp)
+                    result = _run_tool_audited("compare", args, input_hint="compare")
                     if result.error:
                         st.error(result.content)
                     else:
@@ -425,11 +427,12 @@ def main() -> None:
                 except Exception as exc:
                     st.error(f"Compare error: {exc}")
 
-    # --- Audit: tool-call observability for this session ---
+    # --- Audit: durable, SQLite-backed tool-call observability for this session ---
     with tab_audit:
+        store = st.session_state.get("audit")
         records = (
-            getattr(st.session_state.get("audit"), "records", [])
-            if "audit" in st.session_state
+            store.records(session_id=st.session_state.get("session_id"))
+            if store is not None
             else []
         )
         if not records:
@@ -437,7 +440,7 @@ def main() -> None:
         else:
             total = len(records)
             errors = sum(1 for r in records if not r["ok"])
-            st.caption(f"{total} tool call(s) · {errors} error(s)")
+            st.caption(f"{total} tool call(s) · {errors} error(s) · persisted to SQLite")
             st.dataframe(pd.DataFrame(records), use_container_width=True)
 
 

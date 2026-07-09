@@ -39,6 +39,7 @@ analytics-demo = [
   "scikit-learn>=1.4,<2.0",
   "scipy>=1.11,<2.0",
   "statsmodels>=0.14,<0.15",
+  "sqlglot>=25.0,<31.0",
 ]
 dev = [
   "jsonschema>=4.20",
@@ -63,6 +64,8 @@ select = ["E", "F", "I", "UP", "B"]
 # Tests guard optional-dependency imports behind pytest.importorskip(...),
 # which necessarily runs before those imports.
 "tests/**" = ["E402"]
+# Synthetic multi-domain fixture generator: long data-row literals are fine.
+"demos/analytics/src/analytics/synthetic_data.py" = ["E501"]
 
 [tool.pytest.ini_options]
 markers = [

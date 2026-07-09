@@ -382,7 +382,9 @@ class AnalyticsToolset:
                 sql = arguments.get("sql", "")
                 if not sql.strip():
                     return ToolResult.failed("sql is required")
-                reason = _read_only_sql_error(sql)
+                from demos.analytics.src.analytics.safe_sql import safe_sql_error
+
+                reason = safe_sql_error(sql)
                 if reason is not None:
                     return ToolResult.failed(reason)
                 rows = self.source.native_query_with_limit(sql, 500)
@@ -415,7 +417,254 @@ class AnalyticsToolset:
             self.outliers(),
             self.regression(),
             self.run_sql(),
+            self.event_impact(),
+            self.change_point(),
         ]
+
+    def event_impact(self) -> Tool:
+        """Impact of events (from an event/changelog table) on a metric.
+
+        Generic: not domain-specific. Given a metric, an event table, and the
+        event column that links to the metric table's key, it computes the metric
+        averaged in the ``windowDays`` *before* vs *after* each event date, across
+        all matched entities. Works for denom changes, price changes, promos,
+        treatment switches — anything recorded as (key, date) events.
+        """
+
+        async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
+            try:
+                metric_ref = arguments.get("metric", "")
+                et_ref = arguments.get("eventTable", "")
+                anchor_key = arguments.get("anchorKey", "")
+                window = int(arguments.get("windowDays", 14))
+                event_filter = arguments.get("eventFilter")
+                breakdown = arguments.get("breakdown")
+                if not (metric_ref and et_ref and anchor_key):
+                    return ToolResult.failed("metric, eventTable, and anchorKey are required")
+
+                mt = _resolve_table(self.model, metric_ref)
+                et = _resolve_table(self.model, et_ref)
+                mcol = metric_ref.split(".")[-1]
+                mt_time = _time_col_name(self.model, mt)
+                et_time = _time_col_name(self.model, et)
+                if not (mt_time and et_time):
+                    return ToolResult.failed("both metric and event tables need a time column")
+                mt_key = _related_key(self.model, et, anchor_key, mt)
+                if mt_key is None:
+                    return ToolResult.failed(
+                        f"no relationship from {et}.{anchor_key} to {mt}; cannot anchor impact"
+                    )
+
+                ev_sql = (
+                    f"SELECT {sql_qcol(et, anchor_key)} AS k, {sql_qcol(et, et_time)} AS d "
+                    f"FROM {sql_quote(et)}"
+                )
+                if event_filter:
+                    ev_sql += f" WHERE {event_filter}"
+                ev_sql += " LIMIT 300"
+
+                if breakdown:
+                    bcol = breakdown.split(".")[-1]
+                    if _resolve_table(self.model, breakdown) != mt:
+                        return ToolResult.failed("breakdown must be a column in the metric table")
+                    bquoted = sql_quote(bcol)
+                    select_extra = f", m.{sql_quote(bcol)} AS {bquoted}"
+                    group_extra = f", {bquoted}"
+                else:
+                    bquoted = None
+                    select_extra = ""
+                    group_extra = ""
+
+                phase = (
+                    f"CASE WHEN m.{sql_quote(mt_time)} >= ev.d - INTERVAL '{window} days' "
+                    f"AND m.{sql_quote(mt_time)} < ev.d THEN 1 "
+                    f"WHEN m.{sql_quote(mt_time)} > ev.d "
+                    f"AND m.{sql_quote(mt_time)} <= ev.d + INTERVAL '{window} days' THEN 2 END"
+                )
+                sql = (
+                    f"WITH ev AS ({ev_sql}), "
+                    f"joined AS ("
+                    f"SELECT m.{sql_quote(mcol)} AS val, ev.d, {phase} AS phase{select_extra} "
+                    f"FROM {sql_quote(mt)} m JOIN ev ON m.{sql_quote(mt_key)} = ev.k"
+                    f") "
+                    f"SELECT AVG(CASE WHEN phase=1 THEN val END) AS pre, "
+                    f"AVG(CASE WHEN phase=2 THEN val END) AS post, "
+                    f"COUNT(CASE WHEN phase=1 THEN 1 END) AS n_pre, "
+                    f"COUNT(CASE WHEN phase=2 THEN 1 END) AS n_post{group_extra} "
+                    f"FROM joined WHERE phase IS NOT NULL"
+                )
+                if bquoted:
+                    sql += f" GROUP BY {bquoted}"
+                rows = self.source.native_query(sql)
+                empty = rows[0].get("n_pre") in (0, None) and rows[0].get("n_post") in (0, None)
+                if not rows or empty:
+                    return ToolResult.failed("no metric rows found in the pre/post windows")
+                return ToolResult.ok(
+                    _frame("event_impact", json.dumps(rows, default=str)[:MAX_RESULT_CHARS]),
+                    data=rows,
+                )
+            except Exception as exc:
+                return ToolResult.failed(f"event_impact failed: {exc}")
+
+        return _make_tool(
+            "event_impact",
+            "Average a metric in the N days before vs after events from an event table. "
+            "Args: metric, eventTable, anchorKey (event column linking to the metric table's key), "
+            "windowDays?, eventFilter? (raw SQL WHERE on the event table), breakdown?.",
+            invoke,
+            _object_schema(
+                {
+                    "metric": _string_array("Metric the event affects (e.g. assetDaily.coinIn)."),
+                    "eventTable": {"type": "string", "description": "Event/changelog table ref."},
+                    "anchorKey": {
+                        "type": "string",
+                        "description": "Event column joining to the metric key (e.g. assetId).",
+                    },
+                    "windowDays": {"type": "integer", "minimum": 1, "default": 14},
+                    "eventFilter": {
+                        "type": "string",
+                        "description": "Optional SQL WHERE on event table (e.g. changeType='X').",
+                    },
+                    "breakdown": {
+                        "type": "string",
+                        "description": "Optional metric-table dimension to break impact down by.",
+                    },
+                },
+                required=("metric", "eventTable", "anchorKey"),
+            ),
+        )
+
+
+    def change_point(self) -> Tool:
+        """Detect regime/break points in a metric's time series (generic).
+
+        Binary segmentation over the daily metric series; for each break reports
+        the pre/post means, relative change, and Cohen's d effect size. Works on
+        any `(value, date)` series — no domain knowledge required.
+        """
+
+        async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
+            try:
+                import numpy as np
+
+                metric = arguments.get("metric", "")
+                time_col = arguments.get("timeColumn", "")
+                min_segment = max(3, int(arguments.get("minSegment", 7)))
+                max_breaks = max(1, min(int(arguments.get("maxBreaks", 5)), 20))
+
+                tc = next(
+                    (
+                        t
+                        for t in self.model.time_columns
+                        if t.ref == time_col or t.column == time_col
+                    ),
+                    None,
+                )
+                if tc is None:
+                    return ToolResult.failed(f"time column '{time_col}' not found")
+                m = [x for x in self.model.metrics if x.ref == metric or x.column == metric]
+                if not m:
+                    return ToolResult.failed(f"metric '{metric}' not found")
+                mm = m[0]
+
+                ts_expr = tc.to_timestamp_sql(sql_qcol(tc.table, tc.column))
+                sql = (
+                    f"SELECT {ts_expr}::date AS period, "
+                    f"{mm.aggregation.upper()}({sql_qcol(mm.table, mm.column)}) AS value "
+                    f"FROM {sql_quote(mm.table)} GROUP BY period ORDER BY period"
+                )
+                rows = self.source.native_query(sql)
+                series = [
+                    (r["period"], float(r["value"]))
+                    for r in rows
+                    if r.get("value") is not None
+                ]
+                if len(series) < 2 * min_segment:
+                    return ToolResult.failed("not enough time periods for change-point detection")
+
+                vals = np.array([v for _, v in series])
+                breaks = _binseg(vals, min_segment, max_breaks)
+                out: list[dict[str, Any]] = []
+                for b in breaks:
+                    pre, post = vals[:b], vals[b:]
+                    if len(pre) < 2 or len(post) < 2:
+                        continue
+                    out.append(
+                        {
+                            "index": int(b),
+                            "date": str(series[b][0]),
+                            "pre_mean": round(float(pre.mean()), 4),
+                            "post_mean": round(float(post.mean()), 4),
+                            "relative_change": round(
+                                float((post.mean() - pre.mean()) / (abs(pre.mean()) or 1)), 4
+                            ),
+                            "cohens_d": round(float(_cohen_d(pre, post)), 3),
+                        }
+                    )
+                return ToolResult.ok(
+                    _frame("change_point", json.dumps(out, default=str)[:MAX_RESULT_CHARS]),
+                    data=out,
+                )
+            except Exception as exc:
+                return ToolResult.failed(f"change_point failed: {exc}")
+
+        return _make_tool(
+            "change_point",
+            "Detect break points in a metric over time. Args: metric, timeColumn, "
+            "minSegment?, maxBreaks?.",
+            invoke,
+            _object_schema(
+                {
+                    "metric": {"type": "string", "description": "Metric ref to analyze."},
+                    "timeColumn": {"type": "string", "description": "Time column ref."},
+                    "minSegment": {"type": "integer", "minimum": 3, "default": 7},
+                    "maxBreaks": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+                },
+                required=("metric", "timeColumn"),
+            ),
+        )
+
+
+def _binseg(vals: Any, min_size: int, max_breaks: int) -> list[int]:
+    """Binary segmentation: split points maximizing between-segment mean gap."""
+    import numpy as np
+
+    breaks: list[int] = []
+
+    def _rec(lo: int, hi: int) -> None:
+        if len(breaks) >= max_breaks or hi - lo < 2 * min_size:
+            return
+        best: int | None = None
+        best_score = 0.0
+        n = hi - lo
+        seg = vals[lo:hi]
+        pref = np.concatenate([[0.0], np.cumsum(seg)])
+        for s in range(lo + min_size, hi - min_size + 1):
+            nl, nr = s - lo, hi - s
+            ml = (pref[s - lo] - pref[0]) / nl
+            mr = (pref[hi - lo] - pref[s - lo]) / nr
+            score = abs(ml - mr) * (nl * nr) / n
+            if score > best_score:
+                best_score = score
+                best = s
+        if best is None:
+            return
+        breaks.append(best)
+        _rec(lo, best)
+        _rec(best, hi)
+
+    _rec(0, len(vals))
+    return sorted(breaks)
+
+
+def _cohen_d(a: Any, b: Any) -> float:
+    import numpy as np
+
+    na, nb = len(a), len(b)
+    sp = float(
+        np.sqrt(((na - 1) * a.var(ddof=1) + (nb - 1) * b.var(ddof=1)) / max(1, na + nb - 2))
+    ) or 1.0
+    return float((b.mean() - a.mean()) / sp)
 
 
 def _make_tool(
@@ -513,6 +762,47 @@ def _query_schema(required: tuple[str, ...] = ("metrics",)) -> dict[str, Any]:
         },
         required=required,
     )
+
+
+def _time_col_name(model: SemanticModel, table: str) -> str | None:
+    for tc in model.time_columns:
+        if tc.table == table:
+            return tc.column
+    for d in model.dimensions:
+        if d.table == table and d.column.lower() in ("day", "date"):
+            return d.column
+    return None
+
+
+def _related_key(model: SemanticModel, from_table: str, from_col: str, to_table: str) -> str | None:
+    """Find the column in ``to_table`` that ``from_table.from_col`` joins to."""
+    for r in model.relationships:
+        if (
+            r.from_table == from_table
+            and r.from_columns
+            and r.from_columns[0] == from_col
+            and r.to_table == to_table
+        ):
+            return r.to_columns[0]
+        if (
+            r.to_table == from_table
+            and r.to_columns
+            and r.to_columns[0] == from_col
+            and r.from_table == to_table
+        ):
+            return r.from_columns[0]
+    return None
+
+
+def _resolve_table(model: SemanticModel, ref: str) -> str:
+    rl = ref.lower()
+    for m in model.metrics:
+        if m.ref.lower() == rl or m.column.lower() == rl:
+            return m.table
+    for d in model.dimensions:
+        if d.ref.lower() == rl or d.column.lower() == rl:
+            return d.table
+    return ref.split(".", 1)[0] if "." in ref else ref
 
 
 def _parse_query_spec(args: dict[str, Any]) -> QuerySpec:

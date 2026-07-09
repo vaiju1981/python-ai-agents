@@ -99,6 +99,39 @@ def plan(model: SemanticModel, spec: QuerySpec) -> str:
     return _apply_order_limit(sql, aliases, ds, spec)
 
 
+def feature_frame_sql(
+    model: SemanticModel, target_table: str, columns: list[tuple[str, str]]
+) -> str:
+    """Row-grain feature frame: join ``target_table`` to related tables and select
+    ``columns`` (``(table, column)`` pairs) at the target's row grain.
+
+    Used by the modeling tools to assemble predictors from multiple tables via
+    discovered relationships. Joins follow the same ``JoinTree`` as ``plan`` but
+    without aggregation, so each target row keeps its own attributes (row-
+    preserving for the usual many-to-one fact→dimension traversals).
+    """
+    tables = {target_table} | {t for (t, _c) in columns}
+    tree = JoinTree.connect(model, tables, {target_table}, root=target_table)
+
+    from_clause = sql_quote(tree.root)
+    for edge in tree.edges:
+        rel = edge.relationship
+        if edge.parent_is_from:
+            on_parts = " AND ".join(
+                f"{sql_qcol(rel.from_table, fc)} = {sql_qcol(rel.to_table, tc)}"
+                for fc, tc in zip(rel.from_columns, rel.to_columns, strict=False)
+            )
+        else:
+            on_parts = " AND ".join(
+                f"{sql_qcol(rel.to_table, tc)} = {sql_qcol(rel.from_table, fc)}"
+                for fc, tc in zip(rel.from_columns, rel.to_columns, strict=False)
+            )
+        from_clause += f" JOIN {sql_quote(edge.child)} ON {on_parts}"
+
+    select = ", ".join(sql_qcol(t, c) for (t, c) in columns)
+    return f"SELECT {select} FROM {from_clause}".strip()
+
+
 # ---------------------------------------------------------------------------
 # JoinTree
 # ---------------------------------------------------------------------------
@@ -131,6 +164,7 @@ class JoinTree:
         model: SemanticModel,
         requested: set[str],
         fact_tables: set[str],
+        root: str | None = None,
     ) -> JoinTree:
         MAX_JOIN_TABLES = 6
         adjacency: dict[str, list[JoinEdge]] = {}
@@ -155,17 +189,21 @@ class JoinTree:
                         queue.append(e.child)
             return visited, parent_edge
 
-        # Try each requested table as the BFS root and keep the one that reaches
-        # the most requested tables (handles multi-hop paths through intermediate
-        # tables that themselves may not be requested).
+        # Default: try each requested table as the BFS root and keep the one that
+        # reaches the most requested tables (handles multi-hop paths through
+        # intermediate tables that themselves may not be requested). When ``root``
+        # is forced (e.g. a modeling target), anchor the tree there.
         best_root: str | None = None
         best_visited: set[str] = set()
         best_parent: dict[str, JoinEdge] = {}
-        for cand in requested:
-            visited, parent_edge = _bfs(cand)
-            reached = len(requested & visited)
-            if reached > len(requested & best_visited):
-                best_root, best_visited, best_parent = cand, visited, parent_edge
+        if root is not None:
+            best_root, best_visited, best_parent = root, *_bfs(root)
+        else:
+            for cand in requested:
+                visited, parent_edge = _bfs(cand)
+                reached = len(requested & visited)
+                if reached > len(requested & best_visited):
+                    best_root, best_visited, best_parent = cand, visited, parent_edge
 
         missing = requested - best_visited
         if missing:

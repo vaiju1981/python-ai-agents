@@ -10,6 +10,7 @@ from python_ai_agents import (
     Message,
     ModelRequest,
     ModelResponse,
+    RecordingObserver,
     RequiredArgumentsValidator,
     ToolCall,
     ToolEffect,
@@ -346,5 +347,45 @@ def test_default_agent_stops_at_max_steps() -> None:
 
         assert response.stop_reason == "max_steps"
         assert len(model.requests) == 2
+
+    anyio.run(run)
+
+
+def test_default_agent_run_tool_goes_through_pipeline_and_audit() -> None:
+    async def run() -> None:
+        audit = InMemoryAuditSink()
+        observer = RecordingObserver()
+        tool = EchoTool(name="echo")
+        agent = DefaultAgent(
+            ScriptedModel(),
+            tools=[tool],
+            audit_sink=audit,
+            observers=[observer],
+        )
+
+        result = await agent.run_tool(
+            "echo", {"message": "hi"}, AgentRequest.ephemeral("host call")
+        )
+
+        assert not result.error
+        assert result.content == "hi"
+        # Tool actually executed...
+        assert tool.calls == [{"message": "hi"}]
+        # ...and the call was governed + audited like an in-turn step.
+        assert [event.event_type for event in audit.events()] == ["tool.start", "tool.end"]
+        assert [c.name for c in observer.tool_calls] == ["echo"]
+
+    anyio.run(run)
+
+
+def test_default_agent_run_tool_unknown_tool_fails_without_audit() -> None:
+    async def run() -> None:
+        audit = InMemoryAuditSink()
+        agent = DefaultAgent(ScriptedModel(), tools=[EchoTool(name="echo")], audit_sink=audit)
+
+        result = await agent.run_tool("missing", {}, AgentRequest.ephemeral("x"))
+
+        assert result.error
+        assert [event.event_type for event in audit.events()] == ["tool.unavailable"]
 
     anyio.run(run)

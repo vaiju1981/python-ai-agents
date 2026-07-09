@@ -16,7 +16,7 @@ from python_ai_agents.core.memory import (
     InMemoryMemory,
     Memory,
 )
-from python_ai_agents.core.model import Message, ModelPort, ModelRequest, Role
+from python_ai_agents.core.model import Message, ModelPort, ModelRequest, Role, ToolCall
 from python_ai_agents.core.observe import AgentObserver
 from python_ai_agents.core.tool import (
     AllTools,
@@ -78,6 +78,20 @@ class DefaultAgent:
             response = await self._run_with_memory(request, memory, persist_response=True)
             await self._notify("on_turn_end", response, _duration_since(turn_start))
             return response
+
+    async def run_tool(
+        self, name: str, arguments: dict[str, Any], request: AgentRequest
+    ) -> ToolResult:
+        """Invoke one named tool through the full governed pipeline.
+
+        Host UIs (e.g. a SQL or guided-query panel) use this to drive a specific
+        tool directly. The call goes through the same argument validation,
+        approval, timeout, result framing, and audit/observer notification as an
+        in-turn tool call — so it is governed and audited like any agent step.
+        """
+        await self._notify("on_tool_call", ToolCall(name=name, arguments=arguments))
+        tool_by_name = {tool.spec.name: tool for tool in self.tools}
+        return await self._invoke_tool(name, arguments, request, tool_by_name)
 
     async def _run_with_memory(
         self,

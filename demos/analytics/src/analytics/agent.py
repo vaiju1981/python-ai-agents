@@ -15,6 +15,7 @@ from demos.analytics.src.analytics.profiler import profile_dataset
 from demos.analytics.src.analytics.semantic_model import SemanticModel
 from demos.analytics.src.analytics.toolset import AnalyticsToolset
 from python_ai_agents import Agent, AgentObserver, DefaultAgent, ModelPort
+from python_ai_agents.core.audit import AuditSink, NullAuditSink
 from python_ai_agents.core.supervise import Router, SupervisorAgent
 
 
@@ -27,6 +28,7 @@ def create_agent(
     model_store: Any = None,
     dataset_sig: str = "",
     max_train_rows: int | None = None,
+    audit_sink: AuditSink | None = None,
 ) -> Agent:
     """Create a schema-driven analytics agent with governed read-only tools."""
     if semantic is None:
@@ -40,8 +42,12 @@ def create_agent(
     system_prompt = (
         "You are a careful data analyst over this dataset. Use these EXACT refs.\n"
         f"SCHEMA: {tools.catalog_json()}\n"
-        "Answer each question by calling exactly ONE tool, then STOP and reply in plain text "
-        "with the numbers — do not make more tool calls after the first result.\n"
+        "Answer each question using as many tool calls as you need to stitch the answer: call a "
+        "tool, read its result, and call another if you need more data (e.g. describe the dataset "
+        "first, then query it; or query two slices and combine them). Always reply in plain text "
+        "using the numbers the tools returned — never compute, estimate, or round "
+        "figures yourself. Stop calling tools once you have what you need and give "
+        "the final answer.\n"
         "Descriptive tools:\n"
         "- run_query: metrics grouped by dimensions; 'last N days' -> lastDays + timeColumn; "
         "'top N' -> limit; simple filters {column,op,value}. For a ratio/per-unit/share metric "
@@ -74,13 +80,14 @@ def create_agent(
         model=model,
         tools=tools.all_tools() + models.all_tools(),
         system_prompt=system_prompt,
-        # The contract is "call exactly ONE tool, then answer" — cap the loop at
-        # one tool call plus the final reply so the model cannot run multi-tool
-        # chains (which would re-query and drift from the first result).
-        max_steps=2,
+        # The model decides how many tools to call to stitch the answer. max_steps is
+        # only a safety ceiling (bounded loop + per-tool timeout) so a stuck turn
+        # cannot run away — every number still comes from a governed read-only call.
+        max_steps=8,
         tool_timeout_seconds=120.0,
         max_tool_result_chars=16_000,
         observers=observers or [],
+        audit_sink=audit_sink or NullAuditSink(),
     )
 
 
@@ -90,6 +97,7 @@ def create_supervisor(
     semantic: SemanticModel | None = None,
     catalog: Any = None,
     router: Router | None = None,
+    audit_sink: AuditSink | None = None,
 ) -> Agent:
     """Create a multi-agent that routes between an analyst and a schema guide."""
     if semantic is None:
@@ -97,7 +105,7 @@ def create_supervisor(
         semantic = SemanticModel.from_profile(profile)
 
     tools = AnalyticsToolset(source, semantic, catalog)
-    analyst = create_agent(source, model, semantic, catalog)
+    analyst = create_agent(source, model, semantic, catalog, audit_sink=audit_sink)
 
     schema_guide = DefaultAgent(
         model=model,
@@ -110,6 +118,7 @@ def create_supervisor(
         max_steps=4,
         tool_timeout_seconds=120.0,
         max_tool_result_chars=16_000,
+        audit_sink=audit_sink or NullAuditSink(),
     )
 
     from python_ai_agents.core.supervise import KeywordRouter

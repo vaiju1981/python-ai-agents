@@ -37,6 +37,11 @@ ANALYTICS_MODEL_PROVIDER=ollama ANALYTICS_MODEL=ornith:latest \
   can cap the training rows via the sidebar ("Max ML training rows", 0 = all) to
   trade accuracy for speed. The chosen count is always reported.
 - **SQL tab** — a read-only DuckDB escape hatch, with an automatic chart.
+- **Audit tab** — every tool call (tool, success, latency, row count, error) is
+  written to a **durable SQLite audit store** (`SqliteAuditStore`, one per
+  dataset) and read back for the UI. The log survives restarts and is queryable,
+  so the agent's activity is observable in production rather than held in a
+  volatile in-memory list.
 - **Optional** (off by default) — an LLM pass to relabel column roles.
 
 The source, profile, semantic model, and agent are built **once per dataset**

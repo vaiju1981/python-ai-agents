@@ -7,6 +7,8 @@ confident keys become seeds for composite key search.
 
 from __future__ import annotations
 
+import os
+import time
 from typing import Any
 
 from demos.analytics.src.analytics.data_source import (
@@ -21,6 +23,26 @@ MIN_COVERAGE = 0.8
 MIN_PARTIAL_COVERAGE = 0.05
 MAX_COMPOSITE_KEY_SIZE = 2
 
+# Global wall-clock budget for relationship discovery. At hundreds of tables the
+# pairwise column-overlap probing is O(tables^2 * cols^2); once the budget is
+# exceeded we stop and return what we have so profiling stays bounded.
+_DISCOVERY_BUDGET_SECONDS = float(os.getenv("ANALYTICS_DISCOVERY_BUDGET_SECONDS", "30"))
+
+
+def _is_join_candidate(
+    role: ColumnRole, distinct: int, rows: int
+) -> bool:
+    """A column is worth testing as a join key unless it is a measure or a
+    high-cardinality free-text column. Identifiers, dimensions, booleans, and
+    dates are always candidates (they are the usual join keys); only high-card
+    TEXT — which dominates the pairwise cost and almost never joins — is dropped.
+    """
+    if role in (ColumnRole.MEASURE_ADDITIVE, ColumnRole.MEASURE_RATIO):
+        return False
+    if role == ColumnRole.TEXT and rows > 0 and (distinct / rows) >= 0.5:
+        return False
+    return True
+
 
 def discover(
     source: DataSource,
@@ -32,17 +54,32 @@ def discover(
     coarse_by_pair: dict[str, Relationship] = {}
     seeds: dict[str, list[tuple[str, str, str, str]]] = {}
 
+    start = time.monotonic()
+    candidates: dict[str, set[str]] = {}
+    for t, roles in roles_by_table.items():
+        cands: set[str] = set()
+        for c, role in roles.items():
+            stat = stats_by_ref.get(f"{t}.{c}")
+            distinct = int(getattr(stat, "distinct", 0) or 0)
+            rows = int(getattr(stat, "rows", 0) or 0)
+            if _is_join_candidate(role, distinct, rows):
+                cands.add(c)
+        candidates[t] = cands
+
     tables = list(roles_by_table.keys())
     for i, t1 in enumerate(tables):
+        if time.monotonic() - start > _DISCOVERY_BUDGET_SECONDS:
+            break
         for t2 in tables[i + 1 :]:
-            for c1_name, c1_role in roles_by_table[t1].items():
-                if c1_role == ColumnRole.MEASURE_ADDITIVE or c1_role == ColumnRole.MEASURE_RATIO:
+            if time.monotonic() - start > _DISCOVERY_BUDGET_SECONDS:
+                break
+            for c1_name in candidates.get(t1, set()):
+                c1_role = roles_by_table[t1][c1_name]
+                if c1_role in (ColumnRole.MEASURE_ADDITIVE, ColumnRole.MEASURE_RATIO):
                     continue
-                for c2_name, c2_role in roles_by_table[t2].items():
-                    if (
-                        c2_role == ColumnRole.MEASURE_ADDITIVE
-                        or c2_role == ColumnRole.MEASURE_RATIO
-                    ):
+                for c2_name in candidates.get(t2, set()):
+                    c2_role = roles_by_table[t2][c2_name]
+                    if c2_role in (ColumnRole.MEASURE_ADDITIVE, ColumnRole.MEASURE_RATIO):
                         continue
                     rel = _test_pair(source, t1, c1_name, t2, c2_name)
                     if rel is None:

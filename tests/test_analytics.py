@@ -8,7 +8,10 @@ import pytest
 # Skip if duckdb not installed
 duckdb = pytest.importorskip("duckdb")
 
+from datetime import timedelta
+
 from demos.analytics.src.analytics.agent import create_agent
+from demos.analytics.src.analytics.audit_store import SqliteAuditStore
 from demos.analytics.src.analytics.charts import choose_chart
 from demos.analytics.src.analytics.csv_source import CsvSource
 from demos.analytics.src.analytics.data_source import ColumnRole, Relationship
@@ -18,6 +21,7 @@ from demos.analytics.src.analytics.semantic_model import Dimension, Metric, Sema
 from demos.analytics.src.analytics.semantic_roles import classify_role
 from demos.analytics.src.analytics.toolset import AnalyticsToolset
 from python_ai_agents import RequestContext, ToolEffect
+from python_ai_agents.core.tool import ToolResult
 
 
 @pytest.fixture
@@ -545,3 +549,57 @@ def test_messy_csv_profiles_without_error(messy_source):
         assert not result.error, result.content
 
     anyio.run(run)
+
+
+def test_sqlite_audit_store_persists_and_queries(tmp_path):
+    store = SqliteAuditStore(tmp_path / "audit.db")
+    store.session_id = "sess-1"
+
+    async def emit():
+        await store.on_tool_result(
+            "run_query", ToolResult.ok("x", data=[1, 2, 3]), timedelta(seconds=1.1)
+        )
+        await store.on_tool_result(
+            "run_sql", ToolResult.failed("nope"), timedelta(seconds=0.2)
+        )
+        await store.on_error("tool", RuntimeError("boom"))
+
+    anyio.run(emit)
+
+    # Durable: a fresh handle over the same file reads the persisted rows back.
+    reopened = SqliteAuditStore(tmp_path / "audit.db")
+    rows = reopened.records(session_id="sess-1")
+    assert len(rows) == 3
+    # Newest first: on_error (last emitted) is the head row.
+    assert rows[0]["tool"] == "<tool>"
+    assert rows[0]["ok"] is False and rows[0]["error"]
+    ok = next(r for r in rows if r["tool"] == "run_query")
+    assert ok["ok"] is True and ok["rows"] == 3 and ok["latency_s"] == 1.1
+
+    # Unrelated session returns nothing; store is a valid AuditSink + observer.
+    assert reopened.records(session_id="other") == []
+
+
+def test_sqlite_audit_store_as_agent_audit_sink(tmp_path):
+    # The store satisfies the core AuditSink protocol, so governance events
+    # (denials, timeouts, errors) from DefaultAgent are persisted too.
+    store = SqliteAuditStore(tmp_path / "audit.db")
+    store.session_id = "sess-2"
+
+    async def emit():
+        from python_ai_agents.core.audit import AuditEvent
+        from python_ai_agents.core.context import RequestContext
+
+        await store.record(
+            AuditEvent.now(
+                "tool.denied",
+                RequestContext.session("sess-2"),
+                "tool=run_sql reason=read-only",
+            )
+        )
+
+    anyio.run(emit)
+    events = store.event_log(session_id="sess-2")
+    assert len(events) == 1
+    assert events[0].event_type == "tool.denied"
+    assert events[0].session_id == "sess-2"
