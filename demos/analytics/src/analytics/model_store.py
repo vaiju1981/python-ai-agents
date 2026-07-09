@@ -218,8 +218,11 @@ class FileModelStore:
         return self.directory / f"{key}.json"
 
     def get(self, key: str, *, max_age: float | None = None) -> ModelRecord | None:
+        from demos.analytics.src.analytics.metrics import inc
+
         path = self._path(key)
         if not path.exists():
+            inc("analytics.model_cache.misses")
             return None
         try:
             with file_lock(path):
@@ -228,11 +231,15 @@ class FileModelStore:
         except ModelCacheIntegrityError:
             raise
         except Exception:
+            inc("analytics.model_cache.misses")
             return None
         if record is None:
+            inc("analytics.model_cache.misses")
             return None
         if max_age is not None and record.age() > max_age:
+            inc("analytics.model_cache.misses")
             return None
+        inc("analytics.model_cache.hits")
         return ModelRecord(
             key=key,
             model=record.model,
@@ -241,8 +248,11 @@ class FileModelStore:
         )
 
     def put(self, record: ModelRecord) -> None:
+        from demos.analytics.src.analytics.metrics import inc
+
         path = self._path(record.key)
         path.parent.mkdir(parents=True, exist_ok=True)
         data = _serialize_record(record, self.signing_key)
         with file_lock(path):
             atomic_write_bytes(path, data)
+        inc("analytics.model_cache.writes")

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any
 
 from demos.analytics.src.analytics.data_source import DataSource, sql_qcol, sql_quote
+from demos.analytics.src.analytics.metrics import current_tool, inc, observe, set_current_tool
 from demos.analytics.src.analytics.query_planner import Filter, QuerySpec, _now_expr, plan
 from demos.analytics.src.analytics.semantic_model import SemanticModel
 from python_ai_agents.core.tool import Tool, ToolEffect, ToolResult, ToolSpec
@@ -50,9 +52,15 @@ class AnalyticsToolset:
         if trust is not None:
             extra["trust"] = trust
             tier = trust.get("tier")
+            inc("analytics.answer.by_trust_tier", tags={"tier": tier or "unknown"})
             if tier and tier != "TRUSTED":
                 reasons = "; ".join(trust.get("reasons", [])[:2])
                 content = f"{content}\n[trust: {tier}{' — ' + reasons if reasons else ''}]"
+                if tier == "INSUFFICIENT":
+                    inc(
+                        "analytics.answer.abstained",
+                        tags={"tool": current_tool() or "unknown"},
+                    )
         env = build_envelope(self.source, sql=sql, row_count=row_count, **extra)
         return ToolResult.ok(content, data, provenance=env.to_dict())
 
@@ -1169,7 +1177,7 @@ def _make_tool(
     invoke_fn: Any,
     input_schema: dict[str, Any],
 ) -> Tool:
-    """Create a Tool with a READ_ONLY effect."""
+    """Create a Tool with a READ_ONLY effect and automatic latency/error metrics."""
 
     class _AnalyticsTool:
         def __init__(self) -> None:
@@ -1185,7 +1193,19 @@ def _make_tool(
             return self._spec
 
         async def invoke(self, arguments: dict[str, Any], context: Any) -> ToolResult:
-            return await invoke_fn(arguments, context)
+            set_current_tool(name)
+            start = time.monotonic()
+            try:
+                result = await invoke_fn(arguments, context)
+            except Exception:
+                inc("analytics.tool.errors", tags={"tool": name})
+                raise
+            elapsed = time.monotonic() - start
+            inc("analytics.tool.calls", tags={"tool": name})
+            observe("analytics.tool.latency_seconds", elapsed, tags={"tool": name})
+            if getattr(result, "error", False):
+                inc("analytics.tool.errors", tags={"tool": name})
+            return result
 
     return _AnalyticsTool()
 

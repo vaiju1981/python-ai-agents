@@ -20,6 +20,7 @@ import time
 from typing import Any
 
 from demos.analytics.src.analytics.data_source import DataSource, sql_literal, sql_qcol, sql_quote
+from demos.analytics.src.analytics.metrics import inc
 from demos.analytics.src.analytics.model_store import ModelRecord, ModelStore, model_key
 from demos.analytics.src.analytics.query_planner import OPERATORS, feature_frame_sql
 from demos.analytics.src.analytics.semantic_model import SemanticModel
@@ -863,6 +864,10 @@ def _drift_check(train_stats: dict[str, Any], df: Any, feature_cols: list[str]) 
         result["recommendation"] = (
             "scored rows' distribution shifted vs training data; "
             "retrain via build_model(retrain=true)"
+        )
+        inc(
+            "analytics.drift.breaches",
+            tags={"feature": worst, "tool": "predict"},
         )
     return result
 
