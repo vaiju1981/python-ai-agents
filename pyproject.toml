@@ -30,13 +30,15 @@ mcp = ["mcp>=1.0"]
 opentelemetry = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
 llamaindex = ["llama-index>=0.10"]
 analytics-demo = [
-  "duckdb>=1.1",
-  "pandas>=2.0",
-  "plotly>=5.0",
-  "streamlit>=1.35",
-  "scikit-learn>=1.4",
-  "scipy>=1.11",
-  "statsmodels>=0.14",
+  # Pinned with upper bounds so fast-moving libraries (DuckDB, Streamlit) cannot
+  # silently break SQL functions or APIs between deployments.
+  "duckdb>=1.1,<2.0",
+  "pandas>=2.0,<3.0",
+  "plotly>=5.0,<6.0",
+  "streamlit>=1.35,<2.0",
+  "scikit-learn>=1.4,<2.0",
+  "scipy>=1.11,<2.0",
+  "statsmodels>=0.14,<0.15",
 ]
 dev = [
   "jsonschema>=4.20",

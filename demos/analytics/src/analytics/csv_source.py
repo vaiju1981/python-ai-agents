@@ -8,6 +8,8 @@ files off disk.
 
 from __future__ import annotations
 
+import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,11 @@ from demos.analytics.src.analytics.data_source import (
     sql_quote,
 )
 
+# Production guards: a wall-clock query timeout (seconds) and a hard cap on rows
+# returned to the caller. Both are env-overridable.
+_QUERY_TIMEOUT_SECONDS = float(os.getenv("ANALYTICS_QUERY_TIMEOUT_SECONDS", "60"))
+_MAX_RESULT_ROWS = int(os.getenv("ANALYTICS_MAX_RESULT_ROWS", "500"))
+
 
 class CsvSource(DataSource):
     """DuckDB-backed CSV data source."""
@@ -31,8 +38,15 @@ class CsvSource(DataSource):
         db_path: str | Path | None = None,
         named_csvs: dict[str, Path] | None = None,
         type_overrides: dict[str, dict[str, str]] | None = None,
+        query_timeout_seconds: float | None = None,
+        max_result_rows: int | None = None,
     ) -> None:
-        self._conn = duckdb.connect(str(db_path) if db_path else ":memory:")
+        self._db_path = str(db_path) if db_path else None
+        self._conn = duckdb.connect(self._db_path or ":memory:")
+        self._query_timeout = (
+            query_timeout_seconds if query_timeout_seconds is not None else _QUERY_TIMEOUT_SECONDS
+        )
+        self._max_result_rows = max_result_rows if max_result_rows is not None else _MAX_RESULT_ROWS
         self._table_names: list[str] = []
         if named_csvs:
             self._import_csvs(named_csvs, type_overrides or {})
@@ -53,6 +67,57 @@ class CsvSource(DataSource):
         # Lock down external access so run_sql can't read arbitrary files
         self._conn.execute("SET enable_external_access = false")
 
+    def _query_connection(self) -> duckdb.DuckDBPyConnection:
+        """Connection to run a query on.
+
+        For a file-backed database we open a short-lived *read-only* connection
+        per query so it can run on a worker thread (DuckDB connections are not
+        safe to share across threads). In-memory databases fall back to the
+        shared connection (run synchronously, no timeout).
+        """
+        if self._db_path:
+            con = duckdb.connect(self._db_path, read_only=True)
+            try:
+                con.execute("SET enable_external_access = false")
+            except Exception:
+                pass
+            return con
+        return self._conn
+
+    def _execute(self, sql: str, limit: int | None) -> list[dict[str, Any]]:
+        def _run() -> list[dict[str, Any]]:
+            con = self._query_connection()
+            try:
+                cur = con.execute(sql)
+                rows = cur.fetchmany(limit) if limit else cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, r, strict=False)) for r in rows]
+            finally:
+                if con is not self._conn:
+                    con.close()
+
+        if self._query_timeout and self._query_timeout > 0 and self._db_path:
+            result: dict[str, Any] = {}
+            error: dict[str, BaseException] = {}
+
+            def _target() -> None:
+                try:
+                    result["value"] = _run()
+                except BaseException as exc:  # noqa: BLE001 - re-raised on main thread
+                    error["exc"] = exc
+
+            worker = threading.Thread(target=_target, daemon=True)
+            worker.start()
+            worker.join(self._query_timeout)
+            if worker.is_alive():
+                raise TimeoutError(
+                    f"query exceeded the {self._query_timeout:g}s limit: {sql[:120]}"
+                )
+            if "exc" in error:
+                raise error["exc"]
+            return result["value"]
+        return _run()
+
     def tables(self) -> list[TableSchema]:
         result = []
         for name in self._table_names:
@@ -69,21 +134,14 @@ class CsvSource(DataSource):
         return []  # Discovered by RelationshipDiscovery, not the source
 
     def sample(self, table: str, limit: int) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            f"SELECT * FROM {sql_quote(table)} LIMIT {max(1, limit)}"
-        ).fetchall()
-        cols = [d[0] for d in self._conn.description]
-        return [dict(zip(cols, row, strict=False)) for row in rows]
+        return self._execute(f"SELECT * FROM {sql_quote(table)}", max(1, limit))
 
     def native_query(self, sql: str) -> list[dict[str, Any]]:
-        rows = self._conn.execute(sql).fetchall()
-        cols = [d[0] for d in self._conn.description]
-        return [dict(zip(cols, row, strict=False)) for row in rows]
+        return self._execute(sql, None)
 
     def native_query_with_limit(self, sql: str, max_rows: int) -> list[dict[str, Any]]:
-        rows = self._conn.execute(sql).fetchmany(max_rows)
-        cols = [d[0] for d in self._conn.description]
-        return [dict(zip(cols, row, strict=False)) for row in rows]
+        capped = min(max(1, max_rows), self._max_result_rows)
+        return self._execute(sql, capped)
 
     @property
     def connection(self) -> duckdb.DuckDBPyConnection:

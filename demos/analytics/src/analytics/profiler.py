@@ -6,6 +6,7 @@ and works with any backend that supports standard SQL.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -19,6 +20,10 @@ from demos.analytics.src.analytics.data_source import (
     sql_quote,
 )
 from demos.analytics.src.analytics.relationships import discover as discover_relationships
+
+# When a table is larger than this many rows, profile its statistics on a
+# reservoir sample to bound cost. Counts/distinct remain exact. 0 = always full.
+_PROFILE_SAMPLE_ROWS = int(os.getenv("ANALYTICS_PROFILE_SAMPLE_ROWS", "0")) or None
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,40 +55,53 @@ _LEADING_ZERO_RE = re.compile(r"0\d+")
 _BOOLS = frozenset({"true", "false", "yes", "no", "y", "n", "t", "f", "0", "1"})
 
 
-def profile_column(source: DataSource, table: str, col: ColumnSchema) -> ColumnProfile:
+def profile_column(
+    source: DataSource, table: str, col: ColumnSchema, sample_rows: int | None = None
+) -> ColumnProfile:
     """Profile a single column using DuckDB SQL."""
     c = sql_quote(col.name)
     t = sql_quote(table)
     numeric = is_numeric(col.physical_type)
 
+    # Exact row / cardinality / null counts on the full table.
     base = (
         f"SELECT COUNT(*) AS n_rows, COUNT(DISTINCT {c}) AS n_distinct, "
         f"COUNT(*) FILTER (WHERE {c} IS NULL) AS n_nulls"
     )
+    exact = source.native_query(f"{base} FROM {t}")[0]
+    rows = int(exact.get("n_rows", 0))
+    distinct = int(exact.get("n_distinct", 0))
+    nulls = int(exact.get("n_nulls", 0))
+
+    # Heavy statistics (min/max/mean/stddev) may run on a reservoir sample of the
+    # table to bound cost on very large data; counts above stay exact.
+    sample_rows = sample_rows or _PROFILE_SAMPLE_ROWS
+    stat_src = (
+        f"(SELECT * FROM {t} USING SAMPLE {int(sample_rows)} ROWS)"
+        if sample_rows and sample_rows > 0 and rows > sample_rows
+        else t
+    )
+    min_val = max_val = mean = stddev = None
     if numeric:
         cd = f"CAST({c} AS DOUBLE)"
-        mma = f", MIN({cd}) AS mn, MAX({cd}) AS mx, AVG({cd}) AS av"
-        sd = f", stddev_pop({cd}) AS sd"
-        agg = _first_ok(
+        stat = _first_ok(
             source,
             [
-                f"{base}{mma}{sd} FROM {t}",
-                f"{base}{mma} FROM {t}",
-                f"{base} FROM {t}",
+                f"SELECT MIN({cd}) AS mn, MAX({cd}) AS mx, AVG({cd}) AS av, "
+                f"stddev_pop({cd}) AS sd FROM {stat_src}",
+                f"SELECT MIN({cd}) AS mn, MAX({cd}) AS mx, AVG({cd}) AS av FROM {stat_src}",
             ],
         )
-    else:
-        agg = source.native_query(f"{base} FROM {t}")[0]
+        min_val = _to_float(stat.get("mn"))
+        max_val = _to_float(stat.get("mx"))
+        mean = _to_float(stat.get("av"))
+        stddev = _to_float(stat.get("sd"))
 
     # Sample values
-    sample_rows = source.native_query(
+    sample_rows_vals = source.native_query(
         f"SELECT DISTINCT {c} AS v FROM {t} WHERE {c} IS NOT NULL LIMIT 20"
     )
-    samples = tuple(str(r["v"]) for r in sample_rows)
-
-    rows = int(agg.get("n_rows", 0))
-    distinct = int(agg.get("n_distinct", 0))
-    nulls = int(agg.get("n_nulls", 0))
+    samples = tuple(str(r["v"]) for r in sample_rows_vals)
 
     # Signals
     signals = set()
@@ -100,8 +118,6 @@ def profile_column(source: DataSource, table: str, col: ColumnSchema) -> ColumnP
     if name_id or high_card:
         signals.add("id-like")
 
-    min_val = _to_float(agg.get("mn")) if numeric else None
-    max_val = _to_float(agg.get("mx")) if numeric else None
     name_time_hint = bool(
         re.search(r"(time|date|epoch|ts|created|updated|timestamp|at)$", name_lower)
     )
@@ -125,8 +141,8 @@ def profile_column(source: DataSource, table: str, col: ColumnSchema) -> ColumnP
         nulls=nulls,
         min=min_val,
         max=max_val,
-        mean=_to_float(agg.get("av")) if numeric else None,
-        stddev=_to_float(agg.get("sd")) if numeric else None,
+        mean=mean,
+        stddev=stddev,
         sample_values=samples,
         signals=frozenset(signals),
     )
@@ -135,6 +151,7 @@ def profile_column(source: DataSource, table: str, col: ColumnSchema) -> ColumnP
 def profile_dataset(
     source: DataSource,
     catalog: Any | None = None,
+    sample_rows: int | None = None,
 ) -> DatasetProfile:
     """Profile all tables and discover relationships."""
     tables = source.tables()
@@ -147,7 +164,7 @@ def profile_dataset(
         typed_cols: list[ColumnSchema] = []
         role_map: dict[str, ColumnRole] = {}
         for col in table.columns:
-            cp = profile_column(source, table.name, col)
+            cp = profile_column(source, table.name, col, sample_rows)
             columns.append(cp)
             from demos.analytics.src.analytics.semantic_roles import classify_role
 

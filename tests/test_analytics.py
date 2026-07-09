@@ -9,11 +9,11 @@ import pytest
 duckdb = pytest.importorskip("duckdb")
 
 from demos.analytics.src.analytics.agent import create_agent
+from demos.analytics.src.analytics.charts import choose_chart
 from demos.analytics.src.analytics.csv_source import CsvSource
 from demos.analytics.src.analytics.data_source import ColumnRole, Relationship
 from demos.analytics.src.analytics.profiler import profile_dataset
 from demos.analytics.src.analytics.query_planner import Filter, QuerySpec, plan
-from demos.analytics.src.analytics.charts import choose_chart
 from demos.analytics.src.analytics.semantic_model import Dimension, Metric, SemanticModel
 from demos.analytics.src.analytics.semantic_roles import classify_role
 from demos.analytics.src.analytics.toolset import AnalyticsToolset
@@ -298,18 +298,9 @@ def test_multi_fact_planning_joins_facts():
 @pytest.fixture
 def two_fact_source(tmp_path):
     sales = tmp_path / "sales.csv"
-    sales.write_text(
-        "region,amount\n"
-        "North,100\n"
-        "South,200\n"
-        "North,50\n"
-    )
+    sales.write_text("region,amount\nNorth,100\nSouth,200\nNorth,50\n")
     returns = tmp_path / "returns.csv"
-    returns.write_text(
-        "region,cost\n"
-        "North,10\n"
-        "South,25\n"
-    )
+    returns.write_text("region,cost\nNorth,10\nSouth,25\n")
     s = CsvSource(named_csvs={"sales": sales, "returns": returns})
     yield s
     s.close()
@@ -403,9 +394,7 @@ def test_query_planner_derived_metric_ratio(source):
         QuerySpec(
             metrics=("sales.amount",),
             dimensions=("sales.region",),
-            derivedMetrics=(
-                {"name": "avg_price", "expression": "sales.amount/sales.quantity"},
-            ),
+            derivedMetrics=({"name": "avg_price", "expression": "sales.amount/sales.quantity"},),
         ),
     )
     assert "SUM(" in sql
@@ -516,3 +505,43 @@ def test_multi_hop_join_via_intermediate_table(chain_source):
 
     anyio.run(run)
 
+
+@pytest.fixture
+def messy_source(tmp_path):
+    # Realistic messy CSV: spaced headers, a quoted numeric with thousands
+    # separators, blank rows, and a free-text column.
+    csv = tmp_path / "messy.csv"
+    csv.write_text(
+        '" Order ID ",Region,Amount,Quantity,Date,Notes\n'
+        '1,North,"1,000",5,2024-01-01,hello\n'
+        '2,South,"2,000",10,2024-01-02,world\n'
+        '3,North,"1,500",7,2024-01-03,\n'
+        '4,East,"3,000",15,2024-01-04,foo\n'
+        "\n"
+    )
+    s = CsvSource(named_csvs={"messy": csv})
+    yield s
+    s.close()
+
+
+def test_messy_csv_profiles_without_error(messy_source):
+    profile = profile_dataset(messy_source)
+    assert len(profile.tables) == 1
+    # Header whitespace / quoting is normalized to 6 columns.
+    assert len(profile.columns) == 6
+    semantic = SemanticModel.from_profile(profile)
+    # A date column and at least one dimension are detected despite the mess.
+    assert any(d.column == "Date" for d in semantic.dimensions)
+    assert any(d.column == "Region" for d in semantic.dimensions)
+    tools = AnalyticsToolset(messy_source, semantic)
+
+    async def run():
+        # Quantity survives as a real measure; the comma-formatted Amount is
+        # correctly treated as text (a sign of messy input, not a crash).
+        result = await tools.run_query().invoke(
+            {"metrics": ["messy.Quantity"], "dimensions": ["messy.Region"], "limit": 10},
+            RequestContext.ephemeral(),
+        )
+        assert not result.error, result.content
+
+    anyio.run(run)

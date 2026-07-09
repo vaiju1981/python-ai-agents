@@ -74,7 +74,10 @@ def create_agent(
         model=model,
         tools=tools.all_tools() + models.all_tools(),
         system_prompt=system_prompt,
-        max_steps=8,
+        # The contract is "call exactly ONE tool, then answer" — cap the loop at
+        # one tool call plus the final reply so the model cannot run multi-tool
+        # chains (which would re-query and drift from the first result).
+        max_steps=2,
         tool_timeout_seconds=120.0,
         max_tool_result_chars=16_000,
         observers=observers or [],
