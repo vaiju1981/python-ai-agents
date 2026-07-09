@@ -71,21 +71,29 @@ class _RowCapture(NoopAgentObserver):
         if result.error:
             return
         # Prefer the tool's structured payload (exact); fall back to parsing framed text.
-        if isinstance(result.data, list) and result.data and isinstance(result.data[0], dict):
-            self.rows = result.data
-            return
-        rows = _extract_rows(result.content)
+        rows = _extract_rows(result.data if result.data is not None else result.content)
         if rows:
             self.rows = rows
 
 
-def _extract_rows(text: object) -> list[dict] | None:
-    """Best-effort: pull the JSON array of row objects out of a framed tool result."""
+def _extract_rows(payload: object) -> list[dict] | None:
+    """Best-effort: find a chartable list of row dicts in a tool result.
+
+    Accepts either a list payload directly, a dict payload that embeds a
+    list-of-dicts field, or a framed text string containing a JSON array.
+    """
     import json
 
-    if not isinstance(text, str):
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        return payload
+    if isinstance(payload, dict):
+        for value in payload.values():
+            if isinstance(value, list) and value and isinstance(value[0], dict):
+                return value
         return None
-    match = re.search(r"\[.*\]", text, re.DOTALL)
+    if not isinstance(payload, str):
+        return None
+    match = re.search(r"\[.*\]", payload, re.DOTALL)
     if not match:
         return None
     try:

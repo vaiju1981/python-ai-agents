@@ -24,6 +24,10 @@ _TIME_NAMES = frozenset(
         "ts",
         "timestamp",
         "datetime",
+        # Sequential index columns (e.g. forecast steps) also make a sensible
+        # line-chart x-axis even though they are not temporal.
+        "step",
+        "index",
     }
 )
 
