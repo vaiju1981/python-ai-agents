@@ -9,12 +9,16 @@ optimizer can reserve committed capital.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from demos.analytics.src.analytics.file_lock import atomic_write_text, file_lock
 
 STATUSES = {"accepted", "rejected", "deferred", "pending"}
 STAGES = ["pending", "approved", "scheduled", "implemented", "rejected", "deferred"]
@@ -79,7 +83,8 @@ class DecisionStore:
         self._outcomes: list[dict[str, Any]] = []
         if file and Path(file).exists():
             try:
-                raw = json.loads(Path(file).read_text())
+                with file_lock(Path(file)):
+                    raw = json.loads(Path(file).read_text())
                 for e in raw.get("entries", []):
                     self._entries[e["rid"]] = DecisionEntry.from_dict(e)
                 self._outcomes = list(raw.get("outcomes", []))
@@ -88,6 +93,33 @@ class DecisionStore:
 
     def _rid(self, unit_id: str, action_type: str) -> str:
         return f"{unit_id}::{action_type}"
+
+    @contextlib.contextmanager
+    def _exclusive(self) -> Iterator[None]:
+        """Hold both the in-process and cross-process lock, and make the
+        in-memory state reflect the latest on-disk contents before mutating.
+
+        Wrapping the whole read-modify-write (not just the save) is what makes
+        concurrent worker *processes* safe: each mutation reloads the current
+        file, applies its change, then atomically writes back.
+        """
+        with self._lock:
+            with file_lock(self.file):
+                self._reload()
+                try:
+                    yield
+                finally:
+                    self._save()
+
+    def _reload(self) -> None:
+        if self.file is None or not Path(self.file).exists():
+            return
+        try:
+            raw = json.loads(Path(self.file).read_text())
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return
+        self._entries = {e["rid"]: DecisionEntry.from_dict(e) for e in raw.get("entries", [])}
+        self._outcomes = list(raw.get("outcomes", []))
 
     def record(
         self,
@@ -102,27 +134,39 @@ class DecisionStore:
             raise ValueError(f"status must be one of {sorted(STATUSES)}")
         now = now or datetime.now(timezone.utc)
         rid = self._rid(unit_id, action_type)
-        with self._lock:
+        with self._exclusive():
             existing = self._entries.get(rid)
             stage = VERB_TO_STAGE.get(status, "pending")
             entry = existing or DecisionEntry(
-                rid=rid, unit_id=unit_id, action_type=action_type,
-                status=status, stage=stage, comment=comment, by=by,
+                rid=rid,
+                unit_id=unit_id,
+                action_type=action_type,
+                status=status,
+                stage=stage,
+                comment=comment,
+                by=by,
             )
             if existing:
                 # Never regress an approved/scheduled/implemented approval.
-                if existing.stage in ("scheduled", "implemented") and stage in ("approved", "pending"):
+                if existing.stage in ("scheduled", "implemented") and stage in (
+                    "approved",
+                    "pending",
+                ):
                     stage = existing.stage
                 entry.status = status
                 entry.stage = stage
                 entry.comment = comment
                 entry.by = by
             entry.history.append(
-                {"at": now.isoformat(), "status": status, "stage": entry.stage,
-                 "comment": comment, "by": by}
+                {
+                    "at": now.isoformat(),
+                    "status": status,
+                    "stage": entry.stage,
+                    "comment": comment,
+                    "by": by,
+                }
             )
             self._entries[rid] = entry
-            self._save()
             return entry
 
     def set_stage(
@@ -139,12 +183,17 @@ class DecisionStore:
             raise ValueError(f"stage must be one of {STAGES}")
         now = now or datetime.now(timezone.utc)
         rid = self._rid(unit_id, action_type)
-        with self._lock:
+        with self._exclusive():
             entry = self._entries.get(rid)
             if entry is None:
                 entry = DecisionEntry(
-                    rid=rid, unit_id=unit_id, action_type=action_type,
-                    status="pending", stage=stage, comment=comment, by=by,
+                    rid=rid,
+                    unit_id=unit_id,
+                    action_type=action_type,
+                    status="pending",
+                    stage=stage,
+                    comment=comment,
+                    by=by,
                 )
             else:
                 entry.stage = stage
@@ -157,7 +206,6 @@ class DecisionStore:
                 {"at": now.isoformat(), "stage": stage, "comment": comment, "by": by}
             )
             self._entries[rid] = entry
-            self._save()
             return entry
 
     def notify_host(
@@ -170,27 +218,29 @@ class DecisionStore:
     ) -> DecisionEntry:
         now = now or datetime.now(timezone.utc)
         rid = self._rid(unit_id, action_type)
-        with self._lock:
+        with self._exclusive():
             entry = self._entries.get(rid)
             if entry is None:
                 entry = DecisionEntry(
-                    rid=rid, unit_id=unit_id, action_type=action_type,
-                    status="pending", stage="pending", comment=note, by=by,
+                    rid=rid,
+                    unit_id=unit_id,
+                    action_type=action_type,
+                    status="pending",
+                    stage="pending",
+                    comment=note,
+                    by=by,
                 )
             entry.notify_state = "requested"
             entry.history.append(
                 {"at": now.isoformat(), "notify": "requested", "note": note, "by": by}
             )
             self._entries[rid] = entry
-            self._save()
             return entry
 
     def approved_actions(self) -> list[str]:
         """Action types currently approved (reserved capital for the optimizer)."""
         return [
-            e.action_type
-            for e in self._entries.values()
-            if e.stage in ("approved", "scheduled")
+            e.action_type for e in self._entries.values() if e.stage in ("approved", "scheduled")
         ]
 
     def board(self) -> dict[str, Any]:
@@ -251,9 +301,8 @@ class DecisionStore:
             "correct": correct,
             "comment": comment,
         }
-        with self._lock:
+        with self._exclusive():
             self._outcomes.append(outcome)
-            self._save()
         return outcome
 
     def outcomes(self) -> list[dict[str, Any]]:
@@ -301,16 +350,17 @@ class DecisionStore:
 
     def close(self) -> None:
         """Flush pending state to disk (state is already persisted per-op)."""
-        with self._lock:
-            self._save()
+        with self._exclusive():
+            pass
 
     def _save(self) -> None:
+        # Callers must already hold both ``self._lock`` and the cross-process
+        # ``file_lock`` (see ``_exclusive``); do NOT re-acquire here, since
+        # ``fcntl.flock`` is not recursive and would self-deadlock.
         if self.file is None:
             return
         data = {
             "entries": [e.to_dict() for e in self._entries.values()],
             "outcomes": self._outcomes,
         }
-        tmp = self.file.with_suffix(self.file.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2))
-        tmp.replace(self.file)
+        atomic_write_text(self.file, json.dumps(data, indent=2))

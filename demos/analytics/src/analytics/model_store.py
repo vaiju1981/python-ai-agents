@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from demos.analytics.src.analytics.file_lock import atomic_write_bytes, file_lock
+
 
 @dataclass(frozen=True, slots=True)
 class ModelRecord:
@@ -90,8 +92,9 @@ class FileModelStore:
         if not path.exists():
             return None
         try:
-            with path.open("rb") as fh:
-                record: ModelRecord = pickle.load(fh)
+            with file_lock(path):
+                with path.open("rb") as fh:
+                    record: ModelRecord = pickle.load(fh)
         except Exception:
             return None
         if max_age is not None and record.age() > max_age:
@@ -100,5 +103,6 @@ class FileModelStore:
 
     def put(self, record: ModelRecord) -> None:
         path = self.directory / f"{record.key}.pkl"
-        with path.open("wb") as fh:
-            pickle.dump(record, fh)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with file_lock(path):
+            atomic_write_bytes(path, pickle.dumps(record))
