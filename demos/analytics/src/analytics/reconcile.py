@@ -25,6 +25,7 @@ class ReconcileResult:
     relative_diff: float
     tolerance: float
     status: str
+    sql: str = ""
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -36,6 +37,7 @@ class ReconcileResult:
             "relativeDiff": round(self.relative_diff, 6),
             "tolerance": tolerance if (tolerance := self.tolerance) is not None else None,
             "status": self.status,
+            "sql": self.sql,
             "notes": self.notes,
         }
 
@@ -71,7 +73,7 @@ def reconcile(
     return ReconcileResult(
         metric=metric, computed=computed, expected=expected,
         absolute_diff=abs_diff, relative_diff=rel,
-        tolerance=tolerance, status=status, notes=notes,
+        tolerance=tolerance, status=status, sql=sql, notes=notes,
     )
 
 

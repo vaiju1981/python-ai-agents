@@ -60,6 +60,7 @@ class ModelsToolset:
         dataset_sig: str = "",
         model_ttl: float | None = None,
         max_train_rows: int | None = None,
+        lineage: Any = None,
     ) -> None:
         self.source = source
         self.model = model
@@ -77,6 +78,9 @@ class ModelsToolset:
         self.max_train_rows = (
             max_train_rows if max_train_rows is not None else _DEFAULT_MAX_TRAIN_ROWS
         )
+        # Optional cross-answer lineage graph (PR-7); shared with the descriptive
+        # toolset so a forecast can link back to the reconcile it was built from.
+        self.lineage = lineage
 
     # -- tool registry --------------------------------------------------------
 
@@ -90,6 +94,7 @@ class ModelsToolset:
         coverage: float | None = None,
         gates: dict[str, bool] | None = None,
         trust: dict[str, Any] | None = None,
+        sql: str | None = None,
     ) -> ToolResult:
         """Wrap a predictive/causal result with a provenance envelope + trust grade.
 
@@ -117,8 +122,17 @@ class ModelsToolset:
             # envelope, rather than appending prose that would break parsers.
             obj = {**obj, "trust": trust}
             extra["trust"] = trust
+        from demos.analytics.src.analytics.lineage import LineageGraph
+
+        answer_id = LineageGraph.new_id()
+        extra["answerId"] = answer_id
         content = _frame(name, json.dumps(obj, default=str)[:MAX_RESULT_CHARS])
         env = build_envelope(self.source, **extra)
+        if self.lineage is not None:
+            self.lineage.record(
+                answer_id, env.dataset_fingerprint, sql or "", parents=self.lineage.scope
+            )
+            self.lineage.scope.append(answer_id)
         return ToolResult.ok(
             content, data=data, provenance=env.to_dict(), trust=trust if trust is not None else None
         )
@@ -389,6 +403,7 @@ class ModelsToolset:
                     "note": "Monthly aggregation; interval ≈ ±1.96×std of month-over-month change.",
                 },
                 data=forecast,
+                sql=sql,
             )
 
         return _make_tool(

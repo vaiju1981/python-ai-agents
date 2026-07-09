@@ -29,15 +29,17 @@ def create_agent(
     dataset_sig: str = "",
     max_train_rows: int | None = None,
     audit_sink: AuditSink | None = None,
+    lineage: Any = None,
 ) -> Agent:
     """Create a schema-driven analytics agent with governed read-only tools."""
     if semantic is None:
         profile = profile_dataset(source, catalog)
         semantic = SemanticModel.from_profile(profile)
 
-    tools = AnalyticsToolset(source, semantic, catalog)
+    tools = AnalyticsToolset(source, semantic, catalog, lineage=lineage)
     models = ModelsToolset(
-        source, semantic, store=model_store, dataset_sig=dataset_sig, max_train_rows=max_train_rows
+        source, semantic, store=model_store, dataset_sig=dataset_sig,
+        max_train_rows=max_train_rows, lineage=lineage,
     )
     system_prompt = (
         "You are a careful data analyst over this dataset. Use these EXACT refs.\n"

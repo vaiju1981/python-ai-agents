@@ -267,21 +267,34 @@ prompt and that the model respects abstentions. This is the linchpin of the
 
 ## PR-7 — Cross-answer lineage graph  *(tracker §G G4)*
 
+**Status:** ✅ implemented.
+
 **Why:** Provenance envelopes are per-answer. A derived answer (forecast built
 on a reconciled metric) cannot currently be traced back through every upstream
 SQL + fingerprint.
 
-**Implement:**
-- New `lineage.py`: a directed graph linking `dataset_sig` → SQL → answer id →
-  downstream answer id. Persist alongside `audit_store`.
-- Each answer records its parent answer ids (when built from prior answers).
-- Add a `trace_lineage(answer_id)` that walks upstream to raw sources.
+**What shipped:**
+- `lineage.py`: a file-backed `LineageGraph` (persisted as `lineage.json` so it
+  lives alongside `audit_store`) linking `dataset_sig` → SQL → answer id →
+  downstream answer id. `record(answer_id, dataset_sig, sql, parents=...)` adds a
+  node; `trace_lineage(answer_id)` walks parents upstream to raw sources
+  (dependency-ordered); `upstream_dataset_sigs` collects the distinct fingerprints
+  in a chain.
+- Both `AnalyticsToolset` and `ModelsToolset` take an optional shared
+  `lineage` graph. Every answer allocates an `answerId`, records a lineage node
+  (with its `dataset_sig` + SQL), and links to the answers produced earlier in
+  the same conversation via the graph's shared `scope`. The `answerId` is also
+  written into the provenance envelope.
+- `ReconcileResult` now carries the `sql` it ran, so the `reconcile` tool can
+  record it; the `forecast` tool records its aggregation SQL too.
+- `create_agent` accepts a shared `lineage` graph passed to both toolsets.
 
-**Verify (E2E):**
-- Test: produce answer A (`reconcile`), then answer B (`forecast`) consuming
-  A; assert `trace_lineage(B)` returns A and the original `dataset_sig` + SQL.
-- Manual: print the lineage of a derived answer and confirm it lists every
-  upstream fingerprint.
+**Verify (E2E):** `tests/test_lineage.py`
+- `reconcile` (answer A) then `forecast` (answer B) on a shared graph: B's node
+  lists A as a parent; `trace_lineage(B)` returns A with its original
+  `dataset_sig` + SQL. A reloaded `LineageGraph` from disk still resolves the
+  chain (persistence).
+- A missing answer id yields an empty trace (no crash).
 
 ---
 

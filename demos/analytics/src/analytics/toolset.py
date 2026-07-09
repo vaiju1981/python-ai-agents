@@ -25,10 +25,20 @@ MAX_RESULT_CHARS = 16_000
 class AnalyticsToolset:
     """Builds governed read-only analytics tools over a ``DataSource`` + ``SemanticModel``."""
 
-    def __init__(self, source: DataSource, model: SemanticModel, catalog: Any = None) -> None:
+    def __init__(
+        self,
+        source: DataSource,
+        model: SemanticModel,
+        catalog: Any = None,
+        lineage: Any = None,
+    ) -> None:
         self.source = source
         self.model = model
         self.catalog = catalog
+        # Optional cross-answer lineage graph (PR-7). When set, every answer
+        # records a node (answer id -> dataset_sig + sql + parents) and links to
+        # the answers produced earlier in the same conversation.
+        self.lineage = lineage
 
     def catalog_json(self) -> str:
         return self.model.catalog_json(self.source.tables(), self.catalog)
@@ -62,7 +72,16 @@ class AnalyticsToolset:
                         "analytics.answer.abstained",
                         tags={"tool": current_tool() or "unknown"},
                     )
+        from demos.analytics.src.analytics.lineage import LineageGraph
+
+        answer_id = LineageGraph.new_id()
+        extra["answerId"] = answer_id
         env = build_envelope(self.source, sql=sql, row_count=row_count, **extra)
+        if self.lineage is not None:
+            self.lineage.record(
+                answer_id, env.dataset_fingerprint, sql or "", parents=self.lineage.scope
+            )
+            self.lineage.scope.append(answer_id)
         return ToolResult.ok(
             content, data, provenance=env.to_dict(), trust=trust if trust is not None else None
         )
@@ -1073,6 +1092,7 @@ class AnalyticsToolset:
                 return self._ok(
                     _frame("reconcile", json.dumps(res.to_dict(), default=str)),
                     data=res.to_dict(),
+                    sql=res.sql,
                 )
             except Exception as exc:
                 return self._fail(f"reconcile failed: {exc}")
