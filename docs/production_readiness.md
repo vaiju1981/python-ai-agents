@@ -193,26 +193,41 @@ alert on them.
 
 ## PR-5 — Partial-failure robustness for fan-out joins
 
+**Status:** ✅ implemented.
+
 **Why:** Multi-fact / fan-out queries assemble several CTEs and joins. If one
 upstream table is missing, schema-drifts, or times out mid-query, behavior is
 undefined today.
 
-**Implement:**
-- Wrap each CTE/segment of `query_planner` assembly so a single failing table
-  yields a clear, scoped error (which table, which reason) rather than a generic
-  SQL failure.
-- Add a "best-effort" mode (opt-in) that drops the offending table and returns
-  the partial result with an explicit `warnings` list in the provenance envelope.
-- Add a schema-contract check: if a referenced column disappears, fail fast with
-  a actionable message (and bump `dataset_sig` so caches invalidate).
+**What shipped:**
+- `query_planner.py`:
+  - `QueryPlanError` (+ `MissingTableError` / `SchemaContractError`) — a scoped
+    error naming the offending `table` and the `reason`, instead of a generic SQL
+    failure at execution time.
+  - `validate_plan(model, spec, source)` — fails fast against the live source
+    schema: every referenced table exists, and every referenced column
+    (metric / dimension / filter / join key) is present.
+  - `plan_query(model, spec, source=None, best_effort=False)` — the
+    partial-failure wrapper. With no `source` it is identical to `plan`; with a
+    `source` it validates first; with `best_effort=True` a failing table is
+    dropped from the spec and the partial query is returned as a `PlanResult`
+    whose `warnings` / `dropped_tables` name what was excluded.
+- `toolset.run_query` / `compare` now call `plan_query(self.model, spec,
+  self.source, best_effort=...)` and surface any `warnings` in the provenance
+  envelope. Best-effort is opt-in via `ANALYTICS_QUERY_BEST_EFFORT=1`.
+- Schema-contract breaches tie into PR-2: dropping a column changes
+  `dataset_sig` (it fingerprints column schema), so cached models keyed on the
+  old signature become a miss.
 
-**Verify (E2E):**
-- Test: build a semantic model with one deliberately broken/missing table;
-  assert the planner raises a named error identifying that table.
-- Test (best-effort mode): same model → result returns with the broken table
-  excluded and `provenance.warnings` lists it.
-- Test: drop a column post-profiling → `dataset_sig` changes → cached models
-  invalidated (ties to PR-2 versioning).
+**Verify (E2E):** `tests/test_query_planner_partial_failure.py`
+- Model referencing a non-existent `ghost` table → `MissingTableError` with
+  `table == "ghost"` (scoped, not a generic SQL error).
+- Same model + `best_effort=True` → `PlanResult` with `dropped_tables == ["ghost"]`,
+  non-empty `warnings`, and SQL that actually executes against the source.
+- Model referencing an existing table with a missing column → `SchemaContractError`
+  naming that table.
+- Drop a column post-profiling → `dataset_sig` changes → a PR-2 cached model
+  under the old signature is a miss (new signature → `get` returns `None`).
 
 ---
 

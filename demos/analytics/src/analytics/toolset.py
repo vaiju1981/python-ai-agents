@@ -8,13 +8,14 @@ and produce framed, capped results.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from typing import Any
 
 from demos.analytics.src.analytics.data_source import DataSource, sql_qcol, sql_quote
 from demos.analytics.src.analytics.metrics import current_tool, inc, observe, set_current_tool
-from demos.analytics.src.analytics.query_planner import Filter, QuerySpec, _now_expr, plan
+from demos.analytics.src.analytics.query_planner import Filter, QuerySpec, _now_expr, plan_query
 from demos.analytics.src.analytics.semantic_model import SemanticModel
 from python_ai_agents.core.tool import Tool, ToolEffect, ToolResult, ToolSpec
 
@@ -115,7 +116,11 @@ class AnalyticsToolset:
         async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
             try:
                 spec = _parse_query_spec(arguments)
-                sql = plan(self.model, spec)
+                planned = plan_query(
+                    self.model, spec, self.source,
+                    best_effort=os.getenv("ANALYTICS_QUERY_BEST_EFFORT") == "1",
+                )
+                sql = planned.sql
                 rows = self.source.native_query_with_limit(sql, 500)
                 # Evidence = rows of the primary base table the query aggregates.
                 base = _resolve_table(self.model, spec.metrics[0]) if spec.metrics else None
@@ -123,6 +128,7 @@ class AnalyticsToolset:
                 return self._ok(
                     _format_rows(sql, rows), data=rows, sql=sql,
                     row_count=len(rows), n=n, coverage=1.0,
+                    warnings=planned.warnings or None,
                 )
             except Exception as exc:
                 return self._fail(f"run_query failed: {exc}")
@@ -162,10 +168,14 @@ class AnalyticsToolset:
                     offset_days=last_days,
                 )
 
-                sql_current = plan(self.model, spec_current)
-                sql_prev = plan(self.model, spec_prev)
+                best = os.getenv("ANALYTICS_QUERY_BEST_EFFORT") == "1"
+                planned_current = plan_query(self.model, spec_current, self.source, best_effort=best)
+                planned_prev = plan_query(self.model, spec_prev, self.source, best_effort=best)
+                sql_current = planned_current.sql
+                sql_prev = planned_prev.sql
                 current = self.source.native_query_with_limit(sql_current, 100)
                 previous = self.source.native_query_with_limit(sql_prev, 100)
+                warnings = planned_current.warnings + planned_prev.warnings
 
                 result = {"current": current, "previous": previous}
 
@@ -193,6 +203,7 @@ class AnalyticsToolset:
                     _frame("compare", json.dumps(result, default=str)[:MAX_RESULT_CHARS]),
                     data=chart_rows,
                     n=len(current) + len(previous), coverage=1.0,
+                    warnings=warnings or None,
                 )
             except Exception as exc:
                 return self._fail(f"compare failed: {exc}")

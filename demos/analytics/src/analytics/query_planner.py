@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from demos.analytics.src.analytics.data_source import sql_qcol, sql_quote
@@ -97,6 +97,194 @@ def plan(model: SemanticModel, spec: QuerySpec) -> str:
 
     aliases = [alias for _, alias in select_metrics]
     return _apply_order_limit(sql, aliases, ds, spec)
+
+
+# ---------------------------------------------------------------------------
+# Partial-failure robustness (PR-5)
+# ---------------------------------------------------------------------------
+
+
+class QueryPlanError(ValueError):
+    """A scoped failure building a query plan, naming the offending table.
+
+    Distinguishes a missing table from a schema-contract breach (a referenced
+    column that disappeared) so callers / operators get an actionable message
+    rather than a generic SQL error at execution time.
+    """
+
+    def __init__(self, table: str, reason: str) -> None:
+        self.table = table
+        self.reason = reason
+        super().__init__(f"query plan failed for table '{table}': {reason}")
+
+
+class MissingTableError(QueryPlanError):
+    """A referenced table is absent from the live data source."""
+
+
+class SchemaContractError(QueryPlanError):
+    """A referenced column is absent from a table that otherwise exists."""
+
+
+@dataclass
+class PlanResult:
+    """Result of planning a query, optionally with best-effort degradation."""
+
+    sql: str
+    warnings: list[str] = field(default_factory=list)
+    dropped_tables: list[str] = field(default_factory=list)
+
+
+def validate_plan(model: SemanticModel, spec: QuerySpec, source: Any) -> None:
+    """Fail fast with a scoped ``QueryPlanError`` if ``spec`` can't be served.
+
+    Checks, against the live ``source`` schema, that every referenced table
+    exists and every referenced column (metric / dimension / filter / join key)
+    is present. Raises :class:`MissingTableError` or :class:`SchemaContractError`
+    naming the offending table and reason.
+    """
+    table_schemas = {t.name: t for t in source.tables()}
+    ms = _resolve_metrics(model, spec.metrics)
+    ds = _resolve_dimensions(model, spec.dimensions)
+    requested = {m.table for m in ms} | {d.table for d in ds}
+
+    def _cols(table: str) -> set[str]:
+        return {c.name for c in table_schemas[table].columns}
+
+    for m in ms:
+        if m.table not in table_schemas:
+            raise MissingTableError(
+                m.table, f"metric '{m.ref}' references table '{m.table}' which is absent"
+            )
+        if m.column not in _cols(m.table):
+            raise SchemaContractError(
+                m.table, f"column '{m.column}' for metric '{m.ref}' is missing"
+            )
+    for d in ds:
+        if d.table not in table_schemas:
+            raise MissingTableError(
+                d.table, f"dimension '{d.ref}' references table '{d.table}' which is absent"
+            )
+        if d.column not in _cols(d.table):
+            raise SchemaContractError(
+                d.table, f"column '{d.column}' for dimension '{d.ref}' is missing"
+            )
+    for f in spec.filters:
+        ft = _filter_table(model, f.column)
+        if ft is None or ft not in table_schemas:
+            continue
+        fc = f.column.split(".")[-1]
+        if fc not in _cols(ft):
+            raise SchemaContractError(ft, f"filter column '{fc}' is missing from table '{ft}'")
+
+    # Join keys: only relevant when the plan spans more than one table.
+    if len(requested) > 1:
+        tree = JoinTree.connect(model, requested, {m.table for m in ms})
+        for edge in tree.edges:
+            rel = edge.relationship
+            for tbl, cols in (
+                (rel.from_table, rel.from_columns),
+                (rel.to_table, rel.to_columns),
+            ):
+                if tbl not in table_schemas:
+                    continue
+                tcols = _cols(tbl)
+                for c in cols:
+                    if c not in tcols:
+                        raise SchemaContractError(
+                            tbl,
+                            f"join column '{c}' on {rel.from_table}.{','.join(rel.from_columns)}"
+                            f"~{rel.to_table}.{','.join(rel.to_columns)} is missing from '{tbl}'",
+                        )
+
+
+def _drop_table_refs(
+    model: SemanticModel, spec: QuerySpec, table: str
+) -> tuple[QuerySpec, int]:
+    """Return a copy of ``spec`` with every reference to ``table`` removed.
+
+    Drops metrics, dimensions, filters, and derived-metric expressions that name
+    the table. Returns the spec and the number of references removed (0 means the
+    table could not be isolated, so the caller should re-raise).
+    """
+    removed = 0
+    new_metrics: list[str] = []
+    for ref in spec.metrics:
+        m = _resolve_metrics(model, (ref,))
+        if m and m[0].table == table:
+            removed += 1
+            continue
+        new_metrics.append(ref)
+    new_dims: list[str] = []
+    for ref in spec.dimensions:
+        d = _resolve_dimensions(model, (ref,))
+        if d and d[0].table == table:
+            removed += 1
+            continue
+        new_dims.append(ref)
+    new_filters = [
+        f for f in spec.filters if _filter_table(model, f.column) != table
+    ]
+    removed += len(spec.filters) - len(new_filters)
+    new_derived = [
+        dm for dm in spec.derivedMetrics if table not in dm.get("expression", "")
+    ]
+    removed += len(spec.derivedMetrics) - len(new_derived)
+    return (
+        replace(
+            spec,
+            metrics=tuple(new_metrics),
+            dimensions=tuple(new_dims),
+            filters=tuple(new_filters),
+            derivedMetrics=tuple(new_derived),
+        ),
+        removed,
+    )
+
+
+def plan_query(
+    model: SemanticModel,
+    spec: QuerySpec,
+    source: Any = None,
+    best_effort: bool = False,
+) -> PlanResult:
+    """Plan ``spec`` with partial-failure robustness.
+
+    - With no ``source``: identical to :func:`plan` (pure SQL assembly).
+    - With a ``source``: validates the plan against the live schema first, so a
+      missing/broken table yields a scoped :class:`QueryPlanError` (naming the
+      table) instead of a generic SQL failure.
+    - With ``best_effort=True``: a failing table is dropped from the spec and the
+      partial query is returned, with the dropped table listed in
+      ``warnings`` / ``dropped_tables``.
+    """
+    if source is None:
+        return PlanResult(sql=plan(model, spec))
+
+    warnings: list[str] = []
+    dropped: list[str] = []
+    working = spec
+    # Bounded loop: each iteration drops at most one table; stop once the plan
+    # validates or nothing more can be dropped.
+    for _ in range(len(model.metrics) + len(model.dimensions) + 2):
+        try:
+            validate_plan(model, working, source)
+            break
+        except QueryPlanError as exc:
+            if not best_effort:
+                raise
+            working, removed = _drop_table_refs(model, working, exc.table)
+            if removed == 0:
+                raise
+            warnings.append(f"dropped table '{exc.table}': {exc.reason}")
+            dropped.append(exc.table)
+
+    if not (working.metrics or working.dimensions):
+        raise QueryPlanError(
+            dropped[-1] if dropped else "?",
+            "every requested table was dropped; nothing left to query",
+        )
+    return PlanResult(sql=plan(model, working), warnings=warnings, dropped_tables=dropped)
 
 
 def feature_frame_sql(
