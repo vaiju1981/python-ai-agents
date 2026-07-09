@@ -78,6 +78,26 @@ class _RowCapture(NoopAgentObserver):
             self.rows = rows
 
 
+class _AuditObserver(NoopAgentObserver):
+    """Records every tool call (name, latency, success, rows) for observability."""
+
+    def __init__(self) -> None:
+        self.records: list[dict] = []
+
+    async def on_tool_result(self, tool_name: str, result: ToolResult, latency: object) -> None:
+        rows = result.data
+        n_rows = len(rows) if isinstance(rows, list) else None
+        self.records.append(
+            {
+                "tool": tool_name,
+                "ok": not result.error,
+                "latency_s": round(float(latency), 3) if latency is not None else None,
+                "rows": n_rows,
+                "error": (result.content[:200] if result.error else ""),
+            }
+        )
+
+
 def _extract_rows(payload: object) -> list[dict] | None:
     """Best-effort: find a chartable list of row dicts in a tool result.
 
@@ -153,12 +173,14 @@ def _ensure_agent(provider: str, model_name: str, max_train_rows: int | None) ->
         return
     capture = _RowCapture()
     st.session_state.capture = capture
+    audit = _AuditObserver()
+    st.session_state.audit = audit
     store = FileModelStore(Path(st.session_state.tmp_dir) / "models")
     st.session_state.agent = create_agent(
         st.session_state.source,
         model_from_env(),
         st.session_state.semantic,
-        observers=[capture],
+        observers=[capture, audit],
         model_store=store,
         dataset_sig=str(st.session_state.data_sig),
         max_train_rows=max_train_rows,
@@ -198,6 +220,16 @@ def main() -> None:
 
         if mode == "Upload CSV":
             uploaded = st.file_uploader("Upload CSV files", type="csv", accept_multiple_files=True)
+            max_files = int(os.getenv("ANALYTICS_MAX_UPLOAD_FILES", "20"))
+            max_bytes = int(os.getenv("ANALYTICS_MAX_UPLOAD_BYTES", str(4 * 1024**3)))
+            if uploaded and len(uploaded) > max_files:
+                st.error(f"Too many files (max {max_files}).")
+                uploaded = []
+            elif uploaded:
+                oversized = [f.name for f in uploaded if f.size > max_bytes]
+                if oversized:
+                    st.error(f"File(s) exceed the size limit: {', '.join(oversized)}")
+                    uploaded = []
             if uploaded:
                 # name+size signature: only re-import when the upload actually changes.
                 sig = tuple(sorted((f.name, f.size) for f in uploaded))
@@ -244,7 +276,9 @@ def main() -> None:
     semantic = st.session_state.semantic
     source = st.session_state.source
 
-    tab_insights, tab_chat, tab_profile, tab_sql = st.tabs(["Insights", "Chat", "Profile", "SQL"])
+    tab_insights, tab_chat, tab_profile, tab_sql, tab_audit = st.tabs(
+        ["Insights", "Chat", "Profile", "SQL", "Audit"]
+    )
 
     # --- Insights: proactive, deterministic ---
     with tab_insights:
@@ -390,6 +424,21 @@ def main() -> None:
                             _render_chart(choose_chart(result.data), result.data)
                 except Exception as exc:
                     st.error(f"Compare error: {exc}")
+
+    # --- Audit: tool-call observability for this session ---
+    with tab_audit:
+        records = (
+            getattr(st.session_state.get("audit"), "records", [])
+            if "audit" in st.session_state
+            else []
+        )
+        if not records:
+            st.info("No tool calls yet. Ask a question or run a query to populate the audit log.")
+        else:
+            total = len(records)
+            errors = sum(1 for r in records if not r["ok"])
+            st.caption(f"{total} tool call(s) · {errors} error(s)")
+            st.dataframe(pd.DataFrame(records), use_container_width=True)
 
 
 if __name__ == "__main__":

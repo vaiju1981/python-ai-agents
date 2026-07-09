@@ -12,7 +12,7 @@ import re
 from typing import Any
 
 from demos.analytics.src.analytics.data_source import DataSource, sql_qcol, sql_quote
-from demos.analytics.src.analytics.query_planner import Filter, QuerySpec, plan
+from demos.analytics.src.analytics.query_planner import Filter, QuerySpec, _now_expr, plan
 from demos.analytics.src.analytics.semantic_model import SemanticModel
 from python_ai_agents.core.tool import Tool, ToolEffect, ToolResult, ToolSpec
 
@@ -174,7 +174,7 @@ class AnalyticsToolset:
                         f"{m.aggregation.upper()}({sql_qcol(m.table, m.column)}) AS {m.column}"
                     )
 
-                where = f"WHERE {ts_expr} >= current_timestamp - INTERVAL '{last_days} days'"
+                where = f"WHERE {ts_expr} >= {_now_expr()} - INTERVAL '{last_days} days'"
                 sql = (
                     f"SELECT {', '.join(select_parts)} FROM {sql_quote(tc.table)} {where} "
                     "GROUP BY period ORDER BY period"
@@ -488,29 +488,29 @@ def _query_schema(required: tuple[str, ...] = ("metrics",)) -> dict[str, Any]:
             "filters": _filter_schema(),
             "lastDays": {"type": "integer", "minimum": 1},
             "timeColumn": {"type": "string"},
-        "orderBy": {"type": "string"},
-        "descending": {"type": "boolean", "default": True},
-        "limit": {"type": "integer", "minimum": 1},
-        "offsetDays": {"type": "integer", "minimum": 0, "default": 0},
-        "derivedMetrics": {
-            "type": "array",
-            "items": _object_schema(
-                {
-                    "name": {"type": "string", "description": "Alias for the derived metric."},
-                    "expression": {
-                        "type": "string",
-                        "description": (
-                            "Arithmetic expression of metric refs, e.g. "
-                            "'sales.amount/sales.quantity'. Refs become their aggregation "
-                            "(SUM/AVG) so ratios stay additive-safe."
-                        ),
+            "orderBy": {"type": "string"},
+            "descending": {"type": "boolean", "default": True},
+            "limit": {"type": "integer", "minimum": 1},
+            "offsetDays": {"type": "integer", "minimum": 0, "default": 0},
+            "derivedMetrics": {
+                "type": "array",
+                "items": _object_schema(
+                    {
+                        "name": {"type": "string", "description": "Alias for the derived metric."},
+                        "expression": {
+                            "type": "string",
+                            "description": (
+                                "Arithmetic expression of metric refs, e.g. "
+                                "'sales.amount/sales.quantity'. Refs become their aggregation "
+                                "(SUM/AVG) so ratios stay additive-safe."
+                            ),
+                        },
                     },
-                },
-                required=("name", "expression"),
-            ),
-            "description": "Optional derived metrics (ratios, per-unit, shares).",
+                    required=("name", "expression"),
+                ),
+                "description": "Optional derived metrics (ratios, per-unit, shares).",
+            },
         },
-    },
         required=required,
     )
 

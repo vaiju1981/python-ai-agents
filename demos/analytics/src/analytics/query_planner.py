@@ -8,6 +8,7 @@ via CTEs before joining (fan-out-safe).
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -19,6 +20,19 @@ from demos.analytics.src.analytics.semantic_model import (
     SemanticModel,
     TimeColumn,
 )
+
+# Configured timezone for time-window filters (compare/trend). The data's time
+# columns are assumed to be stored in this timezone; "now" is evaluated in it so
+# period windows are stable regardless of server locale. Override via env.
+_TIMEZONE = os.getenv("ANALYTICS_TIMEZONE", "UTC")
+if not re.fullmatch(r"[A-Za-z0-9_+/.\-]+", _TIMEZONE or ""):
+    _TIMEZONE = "UTC"
+
+
+def _now_expr() -> str:
+    """Current time evaluated in the configured timezone (wall clock)."""
+    return f"current_timestamp AT TIME ZONE '{_TIMEZONE}'"
+
 
 OPERATORS = {"=", "!=", "<>", "<", "<=", ">", ">="}
 
@@ -214,9 +228,7 @@ def _resolve_metrics(model: SemanticModel, refs: tuple[str, ...]) -> list[Metric
     return result
 
 
-def _resolve_select_metrics(
-    model: SemanticModel, spec: QuerySpec
-) -> list[tuple[str, str]]:
+def _resolve_select_metrics(model: SemanticModel, spec: QuerySpec) -> list[tuple[str, str]]:
     """Resolve metrics (and any derived metrics) into ``(sql_expr, alias)`` pairs.
 
     Derived-metric expressions reference metric refs (``table.col`` or bare
@@ -225,9 +237,7 @@ def _resolve_select_metrics(
     """
     out: list[tuple[str, str]] = []
     for m in _resolve_metrics(model, spec.metrics):
-        out.append(
-            (f"{m.aggregation.upper()}({sql_qcol(m.table, m.column)})", m.column)
-        )
+        out.append((f"{m.aggregation.upper()}({sql_qcol(m.table, m.column)})", m.column))
     for d in spec.derivedMetrics:
         name = d.get("name") or "derived"
         expr = d.get("expression", "")
@@ -269,9 +279,7 @@ def _build_where(model: SemanticModel, spec: QuerySpec) -> str:
     return _build_where_for_table(model, spec, None)
 
 
-def _build_where_for_table(
-    model: SemanticModel, spec: QuerySpec, table: str | None
-) -> str:
+def _build_where_for_table(model: SemanticModel, spec: QuerySpec, table: str | None) -> str:
     """Build a WHERE clause.
 
     When ``table`` is ``None`` every filter/time clause is emitted (used by the
@@ -294,10 +302,10 @@ def _build_where_for_table(
             ts_expr = tc.to_timestamp_sql(_safe_ref(spec.time_column))
             offset = spec.offset_days or 0
             clauses.append(
-                f"{ts_expr} >= current_timestamp - INTERVAL '{spec.last_days + offset} days'"
+                f"{ts_expr} >= {_now_expr()} - INTERVAL '{spec.last_days + offset} days'"
             )
             if offset > 0:
-                clauses.append(f"{ts_expr} < current_timestamp - INTERVAL '{offset} days'")
+                clauses.append(f"{ts_expr} < {_now_expr()} - INTERVAL '{offset} days'")
 
     return f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
@@ -434,9 +442,7 @@ def _fact_chain_join(
 
         where_t = _build_where_for_table(model, spec, t)
         group_clause = (
-            f"GROUP BY {', '.join(sql_qcol(t, c) for c in group_cols)}"
-            if group_cols
-            else ""
+            f"GROUP BY {', '.join(sql_qcol(t, c) for c in group_cols)}" if group_cols else ""
         )
         cte_sql = (
             f"{sql_quote(t)} AS ("
