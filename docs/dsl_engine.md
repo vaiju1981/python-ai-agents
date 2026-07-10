@@ -295,8 +295,13 @@ dsl = nl_to_dsl("show revenue by region for the last 30 days", engine)
 - **Time windows assume UTC** (`current_timestamp AT TIME ZONE 'UTC'`). Data
   stored in another timezone should be converted upstream or the `TimeColumn`
   encoding adjusted.
-- **Value normalization** is a string→string map (`north` → `N`); custom logic
-  (e.g. date parsing) needs a callable normalizer, which is not yet wired.
+- **Value normalization** supports both static maps (`north` → `N`) and
+  **callable normalizers** (`DIMENSION_VALUES_DETECTION_MAPPER` style), e.g.
+  `value_synonyms={"sales.region": {"south": lambda v: v.upper()[:1]}}`.
+- **LLM detector** is available via `OllamaEntityDetector` (local Ollama,
+  `http://localhost:11434`). Model is `PAA_OLLAMA_MODEL` (default `ornith:latest`;
+  `gemma4:31b-cloud` also works); run the gated test with
+  `PAA_RUN_OLLAMA_TESTS=1`. The LLM only *proposes* DSL; execution is the engine's.
 - **Best-effort caching** is keyed by `dataset_sig` + DSL text; it is disabled
   when `best_effort=True` (a dropped table depends on live source state).
 

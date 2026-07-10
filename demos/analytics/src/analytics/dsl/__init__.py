@@ -26,6 +26,7 @@ from demos.analytics.src.analytics.dsl.nl import (
     LLMEntityDetector,
     LocalEntityDetector,
     NLDetectError,
+    OllamaEntityDetector,
     nl_to_dsl,
 )
 from demos.analytics.src.analytics.dsl.parser import DslParseError, parse
@@ -48,6 +49,7 @@ __all__ = [
     "DslParseError",
     "LocalEntityDetector",
     "LLMEntityDetector",
+    "OllamaEntityDetector",
     "nl_to_dsl",
     "NLDetectError",
 ]

@@ -82,9 +82,10 @@ class NameResolver:
 
     def __post_init__(self) -> None:
         # Normalize synonym keys/values to lower case for case-insensitive lookup.
+        # Callable value normalizers are preserved as-is (not lower-cased).
         self.synonyms = {k.lower(): v for k, v in self.synonyms.items()}
         self.value_synonyms = {
-            k: {vk.lower(): vv for vk, vv in v.items()}
+            k: {vk.lower(): (vv if callable(vv) else vv) for vk, vv in v.items()}
             for k, v in self.value_synonyms.items()
         }
         self.period_synonyms = {k.lower(): v for k, v in self.period_synonyms.items()}
@@ -167,14 +168,20 @@ class NameResolver:
 
     # -- filter values -------------------------------------------------------
     def resolve_value(self, dimension_ref: str, value: Any) -> Any:
-        """Normalize a filter literal via the per-dimension value map."""
+        """Normalize a filter literal via the per-dimension value map.
+
+        Values may be plain strings or **callable normalizers** (the
+        ``DIMENSION_VALUES_DETECTION_MAPPER``-style registry), e.g. a function
+        that parses/normalizes dates or codes. Callable normalizers receive the
+        raw value and return the normalized form.
+        """
         if not isinstance(value, str):
             return value
         vmap = self.value_synonyms.get(dimension_ref)
         if vmap:
             norm = vmap.get(value.lower())
             if norm is not None:
-                return norm
+                return norm(value) if callable(norm) else norm
         return value
 
     # -- periods -------------------------------------------------------------

@@ -24,6 +24,8 @@ Detectordesign (registry pattern, like ``nlp_api``'s
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -162,6 +164,88 @@ class LLMEntityDetector:
             between_start=raw.get("between_start"),
             between_end=raw.get("between_end"),
         )
+
+
+class OllamaEntityDetector:
+    """LLM entity detector backed by a local Ollama server.
+
+    Sends the question plus the engine's known vocabulary (metrics / dimensions /
+    synonyms) to Ollama and parses the JSON entity set it returns. The model is
+    intentionally *outside* the execution path: it only *proposes* the DSL, which
+    ``nl_to_dsl`` then hands to the engine for grounding + safe planning.
+
+    Defaults to ``ornith:latest`` (override via ``PAA_OLLAMA_MODEL`` or the
+    ``model`` argument); ``gemma4:31b-cloud`` works equally well. Gated behind
+    ``PAA_RUN_OLLAMA_TESTS=1`` in tests so CI never requires a running model.
+    """
+
+    def __init__(
+        self,
+        model: str | None = None,
+        base_url: str = "http://localhost:11434",
+        timeout: float = 120.0,
+    ) -> None:
+        self.model = model or os.environ.get("PAA_OLLAMA_MODEL", "ornith:latest")
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+
+    def detect(self, text: str, engine: Any) -> Entities:
+        prompt = _ollama_prompt(text, engine)
+        raw = self._generate(prompt)
+        data = _extract_json(raw)
+        return Entities(
+            metrics=list(data.get("metrics", [])),
+            dimensions=list(data.get("dimensions", [])),
+            filters=[DslFilter(**f) for f in data.get("filters", [])],
+            last_days=data.get("last_days"),
+            between_start=data.get("between_start"),
+            between_end=data.get("between_end"),
+        )
+
+    def _generate(self, prompt: str) -> str:
+        import urllib.request
+
+        payload = json.dumps(
+            {"model": self.model, "prompt": prompt, "stream": False}
+        ).encode()
+        req = urllib.request.Request(
+            f"{self.base_url}/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            body = json.loads(resp.read().decode())
+        return body.get("response", "")
+
+
+def _ollama_prompt(text: str, engine: Any) -> str:
+    """Build a self-contained prompt: instructions + the engine's vocabulary."""
+    model: SemanticModel = engine.model
+    resolver: NameResolver = engine.resolver
+    metrics = sorted({m.ref for m in model.metrics} | set(resolver.synonyms.keys()))
+    dims = sorted({d.ref for d in model.dimensions})
+    vocab = json.dumps({"metrics": metrics, "dimensions": dims, "synonyms": resolver.synonyms})
+    return (
+        "You are an analytics query parser. Given a natural-language question, "
+        "return a single JSON object with these keys:\n"
+        "  metrics: list of metric refs chosen ONLY from the vocabulary\n"
+        "  dimensions: list of dimension refs chosen ONLY from the vocabulary\n"
+        "  filters: list of {column, op, value} (op in =, !=, <, <=, >, >=, IN)\n"
+        "  last_days: integer or null\n"
+        "  between_start: date 'YYYY-MM-DD' or null\n"
+        "  between_end: date 'YYYY-MM-DD' or null\n"
+        "Use only names from the provided vocabulary. Respond with JSON only.\n"
+        f"Vocabulary: {vocab}\n"
+        f"Question: {text}\n"
+    )
+
+
+def _extract_json(raw: str) -> dict[str, Any]:
+    """Extract the first JSON object from an LLM response (tolerates markdown)."""
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        raise NLDetectError(f"LLM did not return JSON: {raw!r}")
+    return json.loads(m.group(0))
 
 
 def nl_to_dsl(text: str, engine: Any, detector: EntityDetector | None = None) -> str:

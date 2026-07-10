@@ -129,3 +129,18 @@ def test_resolve_period_normalizes_phrases():
     assert resolver.resolve_period("last month") == "30 days"
     # Unknown phrase passes through unchanged (parser handles it directly).
     assert resolver.resolve_period("since 2024-01-01") == "since 2024-01-01"
+
+
+def test_callable_value_normalizer():
+    # value_synonyms values may be callables (DIMENSION_VALUES_DETECTION_MAPPER
+    # style normalizers), not just static strings.
+    resolver = NameResolver(
+        synonyms={"region": "sales.region"},
+        value_synonyms={
+            "sales.region": {"north": "N", "south": lambda v: v.upper()[:1]}
+        },
+    )
+    assert resolver.resolve_value("sales.region", "north") == "N"
+    assert resolver.resolve_value("sales.region", "south") == "S"
+    # Unknown value passes through unchanged.
+    assert resolver.resolve_value("sales.region", "east") == "east"

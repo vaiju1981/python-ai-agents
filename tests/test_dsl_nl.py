@@ -156,3 +156,34 @@ def test_no_entity_degrades_gracefully():
     with pytest.raises(NLDetectError):
         nl_to_dsl("please make me a sandwich", engine)
     src.close()
+
+
+_OLLAMA_ENABLED = os.environ.get("PAA_RUN_OLLAMA_TESTS") == "1"
+
+
+@pytest.mark.skipif(not _OLLAMA_ENABLED, reason="set PAA_RUN_OLLAMA_TESTS=1 with a running Ollama")
+def test_ollama_detector_produces_executable_dsl():
+    """Live LLM detector (Ollama). Model via PAA_OLLAMA_MODEL (default ornith:latest;
+    gemma4:31b-cloud also works). Skips if Ollama is unreachable."""
+    from demos.analytics.src.analytics.dsl.nl import OllamaEntityDetector
+
+    df = _sales_df()
+    src = _csv_source("sales", df)
+    model = _sales_model()
+    engine = DslEngine(
+        src, model, synonyms={"revenue": "sales.amount", "region": "sales.region"}
+    )
+    detector = OllamaEntityDetector(model=os.environ.get("PAA_OLLAMA_MODEL", "ornith:latest"))
+    try:
+        dsl = nl_to_dsl(
+            "show revenue by region for the last 30 days", engine, detector=detector
+        )
+    except Exception as exc:  # Ollama not running / model missing
+        pytest.skip(f"Ollama unavailable: {exc}")
+    result = engine.query(dsl)
+    baseline = df.groupby("region")["amount"].sum().to_dict()
+    metric_col = [k for k in result.rows[0] if k != "region"][0]
+    got = {r["region"]: r[metric_col] for r in result.rows}
+    for region, total in baseline.items():
+        assert got[region] == pytest.approx(total)
+    src.close()
