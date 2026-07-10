@@ -465,22 +465,54 @@ quality degrades.
 
 ## PR-11 — Streaming / incremental profiling  *(tracker §G G5)*
 
+**Status:** ✅ implemented.
+
 **Why:** `profiler.py` re-profiles from scratch on each `profile_dataset`. As
 new data lands, this is wasteful and can thrash `dataset_sig`/caches.
 
-**Implement:**
-- Add incremental update of column stats + relationship discovery as new rows
-  arrive (reservoir-counted stats; decay or windowing for drift-sensitive
-  columns).
-- Reconcile `dataset_sig` semantics so incremental updates don't needlessly
-  invalidate models (only invalidate on schema/role change, not on row growth).
+**What shipped:**
+- `profiler.py`:
+  - `ColumnProfile` now carries running sufficient statistics (`sum`, `sumsq`)
+    and a `merge(other, *, decay=0.0)` method. `merge_column_profiles` combines
+    two column snapshots exactly via the parallel (Chan) variance formula, so the
+    result equals profiling the union of both batches. `decay` (0..1) windows the
+    older profile for drift-sensitive columns (e.g. `0.1` keeps 90% of old
+    weight).
+  - `ColumnProfile.from_batch(table, col, values)` profiles an in-memory batch
+    (list / `DataFrame` column) with **no source query** — the genuinely
+    streaming O(batch) path.
+  - `profile_dataset_incremental(source, *, prev, new_rows=None, decay=0.0,
+    ...)` updates `prev` as new data lands. With `new_rows` it merges only the
+    arrived batch (never re-reads the whole table), so per-update cost is
+    O(batch) and bounded as the stream grows. Relationship discovery only
+    re-runs when the **schema** actually changed (new/dropped table or column, or
+    a type change); otherwise the prior relationships are reused, which keeps the
+    update inside the A4 discovery budget (`_DISCOVERY_BUDGET_SECONDS`).
+- `dataset_fingerprint.py`:
+  - `fingerprint(source, *, row_count_aware=True)` now supports a
+    `row_count_aware` flag. When `False`, the signature depends only on schema
+    (name/type/role) and a **distribution-shaped, row-count-agnostic** content
+    digest (min/max/mean/stddev + distinct — no `SUM`/`COUNT(*)`), so appending
+    more rows of the same distribution leaves the signature stable. Numeric
+    aggregates are rounded to fixed significant figures (`_round_sig`) so the
+    digest is bit-stable across different row counts (floating-point summation
+    order would otherwise leave a 1-ULP tail).
+  - `ModelsToolset` now builds its model-cache key from
+    `fingerprint(source, row_count_aware=False)`, so pure row growth does not
+    needlessly retrain models while a schema/role change still invalidates.
 
-**Verify (E2E):**
-- Test: profile a dataset, append rows, run incremental update; assert stats
-  update and that a pure row-count growth does NOT change the model-invalidation
-  signature (while a schema change still does).
-- Test: incremental profiling of a growing stream stays within a bounded time
-  budget (tie to the A4 discovery budget).
+**Verify (E2E):** `tests/test_production_incremental_profiling.py`
+- Profile a dataset, append rows of the same distribution, run the incremental
+  update: column stats advance (rows grow, mean preserved) **and**
+  `fingerprint(source, row_count_aware=False)` is unchanged — pure row growth
+  does not invalidate the model cache. Adding a column changes the signature
+  (schema change still invalidates).
+- `merge_column_profiles` matches a full re-profile exactly (rows/distinct/nulls).
+- A growing stream (constant-size batches appended repeatedly): every incremental
+  update stays fast and flat — cost does not grow with accumulated rows (bounded
+  by the A4 discovery budget).
+- End-to-end: a model keyed on the incremental profile is stable across repeated
+  growth, proving the cache is not thrashed.
 
 ---
 

@@ -54,7 +54,9 @@ def test_models_toolset_default_sig_is_fingerprint(tmp_path):
     s, m = _domain("health", tmp_path)
     tools = ModelsToolset(s, m)  # no dataset_sig supplied
     try:
-        assert tools.dataset_sig == fingerprint(s)
+        # The model-cache signature is row-count-agnostic (PR-11): pure row
+        # growth must not invalidate trained models, only schema/role changes do.
+        assert tools.dataset_sig == fingerprint(s, row_count_aware=False)
     finally:
         s.close()
 
@@ -66,9 +68,7 @@ def test_fingerprint_invalidates_cached_model(tmp_path):
     s2, m2 = _domain("casino", tmp_path)
     t2 = ModelsToolset(s2, m2)
     try:
-        k1 = t1._prepare_model_spec(
-            {"target": "visits.cost", "predictors": ["patients.age"]}
-        )
+        k1 = t1._prepare_model_spec({"target": "visits.cost", "predictors": ["patients.age"]})
         k2 = t2._prepare_model_spec(
             {"target": "sessions.coinIn", "predictors": ["players.tenureDays"]}
         )
@@ -202,7 +202,7 @@ def test_change_point_detects_injected_break(tmp_path):
     rng = np.random.default_rng(0)
     vals = list(rng.normal(100, 5, 30)) + list(rng.normal(200, 5, 30))
     lines = ["day,value"] + [
-        f"2025-01-{i+1:02d},{v:.2f}" if i < 30 else f"2025-02-{i-29:02d},{v:.2f}"
+        f"2025-01-{i + 1:02d},{v:.2f}" if i < 30 else f"2025-02-{i - 29:02d},{v:.2f}"
         for i, v in enumerate(vals)
     ]
     csv.write_text("\n".join(lines) + "\n")

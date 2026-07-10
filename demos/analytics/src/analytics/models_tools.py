@@ -73,7 +73,10 @@ class ModelsToolset:
         if not dataset_sig:
             from demos.analytics.src.analytics.dataset_fingerprint import fingerprint
 
-            dataset_sig = fingerprint(source)
+            # Row-count-agnostic signature: pure data growth (more rows of the
+            # same distribution) must not needlessly invalidate trained models,
+            # only schema/role changes do (PR-11).
+            dataset_sig = fingerprint(source, row_count_aware=False)
         self.dataset_sig = dataset_sig
         self.model_ttl = model_ttl
         # None = train on the full table (the default). A positive value caps rows
