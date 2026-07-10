@@ -120,7 +120,7 @@ source of truth for "what is average price".
 
 ---
 
-## PR-D2 — Textual DSL parser → query IR
+## PR-D2 — Textual DSL parser → query IR  ✅ implemented
 
 **Why:** The engine has no textual query language — `QuerySpec` is assembled in
 Python only. `api-multisite` has CQL (`d/m/g/p/s/l/c/r`); `nlp_api` has an IR

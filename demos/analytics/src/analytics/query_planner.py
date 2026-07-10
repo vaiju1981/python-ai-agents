@@ -51,6 +51,8 @@ class QuerySpec:
     filters: tuple[Filter, ...] = ()
     last_days: int | None = None
     time_column: str | None = None
+    between_start: str | None = None
+    between_end: str | None = None
     order_by: str | None = None
     descending: bool = True
     limit: int | None = None
@@ -66,7 +68,7 @@ def plan(model: SemanticModel, spec: QuerySpec) -> str:
     """Turn a ``QuerySpec`` into read-only SQL over the semantic model."""
     ms = _resolve_metrics(model, spec.metrics)
     ds = _resolve_dimensions(model, spec.dimensions)
-    if not ms:
+    if not ms and not spec.derivedMetrics:
         raise ValueError("at least one metric is required")
 
     where = _build_where(model, spec)
@@ -566,6 +568,13 @@ def _build_where_for_table(model: SemanticModel, spec: QuerySpec, table: str | N
             )
             if offset > 0:
                 clauses.append(f"{ts_expr} < {_now_expr()} - INTERVAL '{offset} days'")
+
+    if spec.between_start and spec.between_end and spec.time_column:
+        tc = _find_time_column(model, spec.time_column)
+        if tc and (table is None or tc.table == table):
+            ts_expr = tc.to_timestamp_sql(_safe_ref(spec.time_column))
+            clauses.append(f"{ts_expr} >= '{_escape(spec.between_start)}'")
+            clauses.append(f"{ts_expr} < '{_escape(spec.between_end)}'")
 
     return f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
