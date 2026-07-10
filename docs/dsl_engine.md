@@ -43,7 +43,7 @@ with a parser (the current `QuerySpec` is built programmatically only), and
 
 ---
 
-## PR-D1 — Calculated-metric catalog (semantic layer)
+## PR-D1 — Calculated-metric catalog (semantic layer)  ✅ implemented
 
 **Why:** Today a "calculated metric" only exists as an ad-hoc `derivedMetrics`
 expression inside a single `QuerySpec` (`query_planner.py:58`). There is no
