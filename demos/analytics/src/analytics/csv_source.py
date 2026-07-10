@@ -176,7 +176,13 @@ class CsvSource(DataSource):
         if not rows:
             return 0
         name = self._require_table(table)
-        cols = list(rows[0].keys())
+        # Schema evolution (PR-16): a streamed batch may carry new columns. Add
+        # any missing columns so the insert (and later queries) succeed without a
+        # full reload.
+        self._evolve_schema(name, rows)
+        # Union of column keys across all rows: a batch may carry a new column in
+        # only some rows, and those rows must still land their extra column.
+        cols = list(dict.fromkeys(k for r in rows for k in r.keys()))
         col_sql = ", ".join(sql_quote(c) for c in cols)
         placeholders = ", ".join(["?"] * len(cols))
         params = [tuple(r.get(c) for c in cols) for r in rows]
@@ -207,7 +213,7 @@ class CsvSource(DataSource):
             return 0
         name = _sanitize_identifier(table)
         if name in self._table_names:
-            return self.append_rows(name, rows)
+            return self.append_rows(name, rows)  # evolves schema if needed
         # Seed a new table from the delta. CREATE TABLE ... AS SELECT infers column
         # types from the (typed) Python values and populates it in one statement.
         cols = list(rows[0].keys())
@@ -254,7 +260,12 @@ class CsvSource(DataSource):
         if not keys:
             raise ValueError("upsert requires at least one key column")
         name = self._require_table(table)
-        cols = list(rows[0].keys())
+        # Schema evolution (PR-16): add any new columns the batch carries before
+        # merging, so a firehose that adds a column never fails the ingest.
+        self._evolve_schema(name, rows)
+        # Union of column keys across all rows (a batch may carry a new column in
+        # only some rows).
+        cols = list(dict.fromkeys(k for r in rows for k in r.keys()))
         col_sql = ", ".join(sql_quote(c) for c in cols)
         row_sql = "(" + ", ".join(["?"] * len(cols)) + ")"
         values_sql = ", ".join([row_sql] * len(rows))
@@ -306,8 +317,13 @@ class CsvSource(DataSource):
                     f"UPDATE {sql_quote(name)} t SET {set_list} "
                     f"FROM {tmp} _tmp WHERE {join_on}"
                 )
+            # Insert only the columns the batch carries (explicit list) so a
+            # partial batch or a post-evolution table with extra columns still
+            # lands correctly.
+            col_list = ", ".join(sql_quote(c) for c in cols)
             self._conn.execute(
-                f"INSERT INTO {sql_quote(name)} SELECT * FROM {tmp} _tmp "
+                f"INSERT INTO {sql_quote(name)} ({col_list}) "
+                f"SELECT {col_list} FROM {tmp} _tmp "
                 f"WHERE NOT EXISTS (SELECT 1 FROM {sql_quote(name)} t WHERE {join_on})"
             )
             inserted = self._conn.execute(f"SELECT COUNT(*) FROM {tmp}").fetchone()[0] - updated
@@ -331,6 +347,57 @@ class CsvSource(DataSource):
     def primary_keys(self, table: str) -> list[str]:
         """Candidate key columns for ``table`` (identifier-style, uniqueness-checked)."""
         return self._detect_keys(table)
+
+    # --- schema evolution (PR-16) --------------------------------------------
+
+    @staticmethod
+    def _duckdb_type(value: Any) -> str | None:
+        """Infer a DuckDB column type from a Python value (``None`` -> untyped)."""
+        import datetime
+
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return "BOOLEAN"
+        if isinstance(value, int):
+            return "BIGINT"
+        if isinstance(value, float):
+            return "DOUBLE"
+        if isinstance(value, datetime.datetime):
+            return "TIMESTAMP"
+        if isinstance(value, datetime.date):
+            return "DATE"
+        return "VARCHAR"
+
+    def _evolve_schema(self, name: str, rows: list[dict[str, Any]]) -> None:
+        """Add columns present in ``rows`` but missing from the live table (PR-16).
+
+        A firehose may introduce a new column mid-stream. Rather than fail the
+        ingest, we ``ALTER TABLE ... ADD COLUMN`` for each new column, typing it
+        from the batch (so pre-existing rows become ``NULL`` in the new column —
+        additive and backward-compatible). Columns absent from the batch are left
+        in place (retired columns are never dropped).
+        """
+        if not rows:
+            return
+        existing = {c.name for c in self._table_columns(name)}
+        # Union of columns across all rows: a new column may appear in only some
+        # rows of the batch.
+        all_cols = list(dict.fromkeys(k for r in rows for k in r.keys()))
+        for col in all_cols:
+            if col in existing:
+                continue
+            typ: str | None = None
+            for r in rows:
+                typ = self._duckdb_type(r.get(col))
+                if typ is not None:
+                    break
+            if typ is None:
+                typ = "VARCHAR"  # all-NULL column: default to VARCHAR
+            self._conn.execute(
+                f"ALTER TABLE {sql_quote(name)} ADD COLUMN {sql_quote(col)} {typ}"
+            )
+            existing.add(col)
 
     def time_column(self, table: str) -> str | None:
         """Best-guess event-time column for ``table`` (temporal type + name heuristic)."""

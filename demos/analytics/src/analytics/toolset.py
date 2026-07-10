@@ -170,6 +170,54 @@ class AnalyticsToolset:
         except Exception:
             return 0
 
+    # --- freshness gate (PR-16) ----------------------------------------------
+
+    def _check_freshness_gate(self, tables: list[str]) -> list[str]:
+        """Subset of ``tables`` that violate the configured max-stale policy."""
+        from demos.analytics.src.analytics.freshness import stale_tables
+
+        return stale_tables(self.source, self.model, tables)
+
+    def _stale_result(self, stale: list[str]) -> ToolResult:
+        """Structured 'stale' answer when the freshness gate trips (PR-16)."""
+        from demos.analytics.src.analytics.freshness import (
+            freshness,
+            max_stale_days,
+        )
+
+        rep = freshness(self.source, self.model)
+        stale_days = {t: rep.tables.get(t, {}).get("staleDays") for t in stale}
+        content = (
+            "Data freshness gate: the following tables are staler than "
+            f"ANALYTICS_MAX_STALE_DAYS ({max_stale_days()}d) and I will not answer "
+            f"silently: {', '.join(stale)}. Re-ingest newer data or pass "
+            "allow_stale=true to override."
+        )
+        return self._ok(
+            content,
+            data={"stale": True, "tables": stale, "staleDays": stale_days},
+        )
+
+    def _window_anchor_sql(self, table: str, ts_expr: str) -> str:
+        """SQL expression for the lower-bound anchor of a trailing window (PR-16).
+
+        Returns ``(SELECT MAX(<ts_expr>) FROM <table>)`` when the table has rows
+        (so the window is anchored at the data frontier / high-water mark), else
+        the configured wall-clock ``now``. Anchoring at the watermark means a
+        trailing-window query transparently includes in-window late rows. The
+        anchor uses the timestamp-converted ``ts_expr`` (not the raw column) so it
+        works for epoch-encoded time columns too.
+        """
+        try:
+            row = self.source.native_query(
+                f"SELECT MAX({ts_expr}) AS m FROM {sql_quote(table)}"
+            )
+            if row and row[0].get("m") is not None:
+                return f"(SELECT MAX({ts_expr}) FROM {sql_quote(table)})"
+        except Exception:
+            pass
+        return _now_expr()
+
     @staticmethod
     def _abstain(kind: str, trust: dict[str, Any], detail: str) -> str:
         return (
@@ -344,7 +392,12 @@ class AnalyticsToolset:
                         f"{m.aggregation.upper()}({sql_qcol(m.table, m.column)}) AS {m.column}"
                     )
 
-                where = f"WHERE {ts_expr} >= {_now_expr()} - INTERVAL '{last_days} days'"
+                # Auto-window (PR-16): anchor the trailing window at the table's
+                # high-water mark (max event time) instead of wall-clock "now", so
+                # a query without an explicit date filter naturally includes
+                # in-window late-arriving rows rather than slicing them off.
+                anchor = self._window_anchor_sql(tc.table, ts_expr)
+                where = f"WHERE {ts_expr} >= {anchor} - INTERVAL '{last_days} days'"
                 sql = (
                     f"SELECT {', '.join(select_parts)} FROM {sql_quote(tc.table)} {where} "
                     "GROUP BY period ORDER BY period"
@@ -566,6 +619,12 @@ class AnalyticsToolset:
                 reason = safe_sql_error(sql)
                 if reason is not None:
                     return ToolResult.failed(reason)
+                # Freshness gate (PR-16): refuse to answer silently against data
+                # older than the policy unless explicitly overridden.
+                if not arguments.get("allow_stale", False):
+                    stale = self._check_freshness_gate(_tables_in_sql(sql))
+                    if stale:
+                        return self._stale_result(stale)
                 rows = self.source.native_query_with_limit(sql, 500)
                 return self._ok(
                     _frame("run_sql", json.dumps(rows, default=str)[:MAX_RESULT_CHARS]),
@@ -578,10 +637,18 @@ class AnalyticsToolset:
         return _make_tool(
             "run_sql",
             "Run read-only DuckDB SQL for custom queries. No INSERT/UPDATE/DELETE/DROP/CREATE. "
-            "Use date_trunc for time buckets, to_timestamp for epoch columns.",
+            "Use date_trunc for time buckets, to_timestamp for epoch columns. "
+            "Pass allow_stale=true to bypass the freshness gate.",
             invoke,
             _object_schema(
-                {"sql": {"type": "string", "description": "Read-only SELECT SQL."}},
+                {
+                    "sql": {"type": "string", "description": "Read-only SELECT SQL."},
+                    "allow_stale": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Answer even if a table is staler than the policy.",
+                    },
+                },
                 required=("sql",),
             ),
         )
@@ -610,6 +677,13 @@ class AnalyticsToolset:
                 if not dsl_text.strip():
                     return ToolResult.failed("dsl query text is required")
                 eng = _engine(arguments.get("synonyms"))
+                # Freshness gate (PR-16): plan without executing so we can refuse
+                # to answer (or override) before touching stale data.
+                if not arguments.get("allow_stale", False):
+                    plan, _, _ = eng._plan(dsl_text)
+                    stale = self._check_freshness_gate(_tables_in_sql(plan.sql))
+                    if stale:
+                        return self._stale_result(stale)
                 result = eng.query(dsl_text)
                 return self._ok(
                     _frame("dsl_query", json.dumps(result.rows, default=str)[:MAX_RESULT_CHARS]),
@@ -626,7 +700,8 @@ class AnalyticsToolset:
             "dsl_query",
             "Run a textual analytics DSL query, e.g. 'SELECT revenue BY region SINCE 30 days "
             "ORDER BY revenue DESC LIMIT 5'. Supports calculated metrics by name and business "
-            "synonyms (pass synonyms: {friendly: ref}). Read-only; returns rows + planned SQL.",
+            "synonyms (pass synonyms: {friendly: ref}). Read-only; returns rows + planned SQL. "
+            "Pass allow_stale=true to bypass the freshness gate.",
             invoke,
             _object_schema(
                 {
@@ -634,6 +709,11 @@ class AnalyticsToolset:
                     "synonyms": {
                         "type": "object",
                         "description": "Optional friendly-name -> ref map (e.g. revenue).",
+                    },
+                    "allow_stale": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Answer even if a table is staler than the policy.",
                     },
                 },
                 required=("dsl",),
@@ -659,6 +739,13 @@ class AnalyticsToolset:
                 eng = DslEngine(self.source, self.model, catalog=self.catalog,
                                 synonyms=arguments.get("synonyms"))
                 dsl_text = nl_to_dsl(text, eng, detector=LocalEntityDetector())
+                # Freshness gate (PR-16): plan without executing so we can refuse
+                # to answer (or override) before touching stale data.
+                if not arguments.get("allow_stale", False):
+                    plan, _, _ = eng._plan(dsl_text)
+                    stale = self._check_freshness_gate(_tables_in_sql(plan.sql))
+                    if stale:
+                        return self._stale_result(stale)
                 result = eng.query(dsl_text)
                 return self._ok(
                     _frame(
@@ -681,7 +768,7 @@ class AnalyticsToolset:
             "nl_query",
             "Answer a natural-language analytics question, e.g. 'show revenue by region for the "
             "last 30 days'. Extracts metrics/dimensions/period locally and runs safe DSL SQL. "
-            "Read-only.",
+            "Read-only. Pass allow_stale=true to bypass the freshness gate.",
             invoke,
             _object_schema(
                 {
@@ -689,6 +776,11 @@ class AnalyticsToolset:
                     "synonyms": {
                         "type": "object",
                         "description": "Optional friendly-name -> ref map.",
+                    },
+                    "allow_stale": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Answer even if a table is staler than the policy.",
                     },
                 },
                 required=("question",),
@@ -1569,6 +1661,22 @@ def _format_rows(sql: str, rows: list[dict[str, Any]]) -> str:
         "run_query",
         f"SQL: {sql}\nRows ({len(rows)}):\n{json.dumps(rows, default=str)[:MAX_RESULT_CHARS]}",
     )
+
+
+def _tables_in_sql(sql: str) -> list[str]:
+    """Extract table names referenced by ``FROM`` / ``JOIN`` clauses in ``sql``.
+
+    Handles quoted identifiers (DuckDB ``"a"."b"``) and dotted catalog-qualified
+    names (takes the first part). Used by the freshness gate (PR-16) to decide
+    which tables a query touches.
+    """
+    out: list[str] = []
+    for m in re.finditer(r"\b(?:FROM|JOIN)\s+([\"\w.]+)", sql, re.IGNORECASE):
+        ident = m.group(1).replace('"', "")
+        part = ident.split(".")[0]
+        if part and part not in out:
+            out.append(part)
+    return out
 
 
 def _read_only_sql_error(sql: str) -> str | None:
