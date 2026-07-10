@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Protocol
 
 
@@ -68,6 +69,22 @@ class DataSource(Protocol):
     def native_query(self, sql: str) -> list[dict[str, Any]]: ...
 
     def native_query_with_limit(self, sql: str, max_rows: int) -> list[dict[str, Any]]: ...
+
+    # --- ingestion seam (PR-12) ---------------------------------------------
+    # These are INTERNAL, server-side write operations for continuous / firehose
+    # ingestion. They must NEVER be exposed as a user-facing tool — the
+    # run_sql / dsl_query tools stay strictly read-only (see safe_sql.py).
+    def append_rows(self, table: str, rows: list[dict[str, Any]]) -> int: ...
+
+    def ingest_csv(
+        self, table: str, csv_path: Path, *, mode: str = "append"
+    ) -> int: ...
+
+    def upsert(
+        self, table: str, rows: list[dict[str, Any]], keys: list[str]
+    ) -> int: ...
+
+    def row_count(self, table: str) -> int: ...
 
     def close(self) -> None: ...
 

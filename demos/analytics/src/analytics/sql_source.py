@@ -7,6 +7,7 @@ DuckDB native files.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 import duckdb
@@ -106,6 +107,24 @@ class SqlSource(DataSource):
         rows = self._conn.execute(sql).fetchmany(max_rows)
         cols = [d[0] for d in self._conn.description]
         return [dict(zip(cols, row, strict=False)) for row in rows]
+
+    # --- ingestion seam (PR-12) ---------------------------------------------
+    # SqlSource is a read-only backend (attached warehouses are READ_ONLY). Use
+    # CsvSource for incremental ingestion. ``row_count`` is provided because it
+    # is a pure read.
+    def row_count(self, table: str) -> int:
+        return self._conn.execute(
+            f"SELECT COUNT(*) FROM {sql_qtable(table)}"
+        ).fetchone()[0]
+
+    def append_rows(self, table: str, rows: list[dict[str, Any]]) -> int:
+        raise NotImplementedError("SqlSource is read-only; use CsvSource for ingestion (PR-12)")
+
+    def ingest_csv(self, table: str, csv_path: Path, *, mode: str = "append") -> int:
+        raise NotImplementedError("SqlSource is read-only; use CsvSource for ingestion (PR-12)")
+
+    def upsert(self, table: str, rows: list[dict[str, Any]], keys: list[str]) -> int:
+        raise NotImplementedError("SqlSource is read-only; use CsvSource for ingestion (PR-12)")
 
     def close(self) -> None:
         self._conn.close()

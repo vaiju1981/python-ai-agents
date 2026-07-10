@@ -81,67 +81,58 @@ What is **missing** for continuous ingestion:
 
 ---
 
-## PR-12 — Ingestion seam (the linchpin)  ⬜ planned
+## PR-12 — Ingestion seam (the linchpin)  ✅ implemented
 
 **Why:** Without a write path on `DataSource`, every later item is impossible.
 This PR adds the minimal, safe, server-side API to land append/upsert batches
-and delta CSVs into a live table, with external access re-opened only for the
-load and re-locked immediately after.
+and delta CSVs into a live table.
 
-**Implement:**
+**Status:** ✅ implemented (commit `PR-12`).
 
-- Extend the `DataSource` protocol (`data_source.py:59`) with:
-  - `append_rows(table: str, rows: list[dict[str, Any]]) -> int` — insert N rows
-    (best-effort typed). Returns rows inserted.
-  - `ingest_csv(table: str, csv_path: Path, *, mode: str = "append") -> int` —
-    load a delta CSV into `table`. `mode="append"` → plain insert; `mode="upsert"`
-    → merge on detected keys (see PR-13). Returns rows added.
-  - `upsert(table: str, rows: list[dict[str, Any]], keys: list[str]) -> int` —
-    idempotent merge on `keys` (reserved for PR-13; default impl can raise
-    `NotImplementedError` until then, or do an append+dedup).
-  - `row_count(table: str) -> int` — cheap `COUNT(*)` helper (profile/freshness
-    already do this; promote to the protocol for symmetry).
+**Key design decision (deviation from the original plan):** the plan proposed a
+`_allow_external()` context manager that re-enabled DuckDB's
+`enable_external_access` for the duration of a delta load. This does **not**
+work: in current DuckDB, once `enable_external_access = false` is set it cannot
+be re-enabled while the database is running ("Cannot enable external access
+while database is running"). Re-enabling it would also be unsafe. Instead,
+`ingest_csv` **reads the delta CSV in the trusted Python process** (pandas when
+available, else the stdlib `csv` module) and inserts the typed rows via
+parameterized SQL. DuckDB never needs external file access for ingestion, so
+the `enable_external_access = false` lockdown (`csv_source.py`) stays
+**permanently on** — strictly stronger than the plan's toggle-and-relock, and
+the `safe_sql.py` file-read guard (commit `c6cbf83`) still blocks any user SQL
+reading files.
+
+**What shipped:**
+
+- `DataSource` protocol (`data_source.py`) now declares
+  `append_rows` / `ingest_csv` / `upsert` / `row_count` (read-only backends
+  raise `NotImplementedError` for the write methods).
 - `CsvSource` (`csv_source.py`):
-  - Add a private context manager `_allow_external()` that does
-    `SET enable_external_access = true` (DuckDB's `lock_configuration` defaults
-    to false, so this is permitted after the init lockdown), yields, then
-    re-runs `SET enable_external_access = false` in a `finally`. If a deployment
-    has locked configuration, ingest raises a clear error rather than silently
-    no-op'ing.
-  - `append_rows`: quote the table (`sql_quote`), build a parameterized
-    `INSERT INTO <t> (cols) VALUES (?, ...)` via DuckDB parameter binding (no
-    string interpolation of values — reuse `sql_literal` only for identifiers,
-    never for data). For large batches prefer `from_df` / `INSERT INTO ... SELECT
-    * FROM (VALUES ...)` to avoid per-row round-trips.
-  - `ingest_csv`: inside `_allow_external()`, run
-    `INSERT INTO <t> SELECT * FROM read_csv_auto('<path>')` (or `read_csv` with
-    the table's `type_overrides`). Re-lock on exit.
-  - Keep `_import_csvs` (used at construction) unchanged; the new methods operate
-    on already-created tables so they compose with the initial load.
-- **Safety guardrails (critical):** ingestion is internal only. Do NOT add any
-  `Tool` wrapping these methods. Add a module-level note + a unit test asserting
-  `run_sql`/`dsl_query` still cannot write and that the file-read guard
-  (`safe_sql.py`, commit `c6cbf83`) still blocks `read_csv` in user SQL.
-- `ParquetSource` / `SqlSource`: implement `append_rows`/`ingest_csv` analogously
-  where the backend supports inserts (Parquet → append to the dataset; SQLSource
-  → `INSERT`); raise `NotImplementedError` for read-only warehouses (document
-  which sources support writes).
+  - `append_rows(table, rows)` — parameterized `executemany` INSERT (no value
+    interpolation); returns rows inserted.
+  - `ingest_csv(table, csv_path, *, mode="append")` — reads the CSV in Python
+    via `_read_csv_rows` and inserts; seeds a new table from the delta when the
+    table does not yet exist. `mode="upsert"` raises `NotImplementedError`
+    (implemented in PR-13).
+  - `upsert(table, rows, keys)` — baseline keyed insert-if-not-exists (append +
+    dedup via a temp-table anti-join); watermark / late-arrival handling is
+    PR-13.
+  - `row_count(table)` — `COUNT(*)` helper.
+- `ParquetSource` / `SqlSource` / `GraphSource`: `row_count` implemented (pure
+  read); the three write methods raise `NotImplementedError` (documented
+  read-only backends).
 
-**Verify (E2E):** `tests/test_ingestion_seam.py`
+**Verify (E2E):** `tests/test_ingestion_seam.py` (11 tests, all green)
 
-- Build a `CsvSource` from a small CSV; call `append_rows` with a few new dicts;
-  assert `row_count` grew by exactly that many and the new values are
-  queryable via `native_query`.
-- Call `ingest_csv(delta.csv, mode="append")`; assert rows added and the live
-  table reflects them (no full re-import — assert the original rows are intact,
-  i.e. it did not `CREATE OR REPLACE`).
-- Assert external access is **re-locked** after ingest: a follow-up
-  `native_query("SELECT * FROM read_csv('/etc/passwd')")` still raises (or
-  returns nothing) — the lockdown holds.
-- Assert `run_sql`/`dsl_query` remain read-only (re-run `test_safe_sql_*` style
-  assertions) and that `safe_sql_error("... read_csv(...)")` still blocks.
-- `ParquetSource`/`SqlSource` either ingest correctly or raise
-  `NotImplementedError` (documented).
+- `append_rows` grows `row_count` and the rows are queryable.
+- `ingest_csv` (append) adds rows **without** a full re-import (original rows
+  intact — no `CREATE OR REPLACE`); seeds a new table when missing.
+- External-access lockdown holds after ingest: a user `SELECT * FROM
+  read_csv('/etc/passwd')` still raises; `safe_sql_error` still blocks writes
+  and file reads (read-only posture preserved).
+- `upsert` skips existing keys; requires keys.
+- Read-only sources implement `row_count` and reject writes.
 
 ---
 

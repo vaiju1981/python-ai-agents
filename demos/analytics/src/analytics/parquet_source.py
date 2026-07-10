@@ -67,6 +67,25 @@ class ParquetSource(DataSource):
         cols = [d[0] for d in self._conn.description]
         return [dict(zip(cols, row, strict=False)) for row in rows]
 
+    # --- ingestion seam (PR-12) ---------------------------------------------
+    # ParquetSource is a read-only backend: it materializes Parquet files into
+    # DuckDB but does not support incremental writes. Incremental ingestion uses
+    # CsvSource (or a streaming connector, PR-15).
+    def row_count(self, table: str) -> int:
+        safe_name = _sanitize(table)
+        return self._conn.execute(
+            f"SELECT COUNT(*) FROM {sql_quote(safe_name)}"
+        ).fetchone()[0]
+
+    def append_rows(self, table: str, rows: list[dict[str, Any]]) -> int:
+        raise NotImplementedError("ParquetSource is read-only; use CsvSource for ingestion (PR-12)")
+
+    def ingest_csv(self, table: str, csv_path: Path, *, mode: str = "append") -> int:
+        raise NotImplementedError("ParquetSource is read-only; use CsvSource for ingestion (PR-12)")
+
+    def upsert(self, table: str, rows: list[dict[str, Any]], keys: list[str]) -> int:
+        raise NotImplementedError("ParquetSource is read-only; use CsvSource for ingestion (PR-12)")
+
     def close(self) -> None:
         self._conn.close()
 
