@@ -203,7 +203,7 @@ grounding so the DSL accepts business vocabulary, with pluggable synonym sources
 
 ---
 
-## PR-D4 — DSL engine orchestrator + planner integration
+## PR-D4 — DSL engine orchestrator + planner integration  ✅ implemented
 
 **Why:** We now have the three pieces (catalog, parser, grounding) but no single
 entry point that turns DSL text into results. This is the "plan → execute"

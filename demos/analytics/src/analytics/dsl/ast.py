@@ -59,14 +59,22 @@ class DslQuery:
         """
         from demos.analytics.src.analytics.query_planner import Filter, QuerySpec
 
+        # Map each metric token to its output SELECT alias so ORDER BY (and the
+        # engine's result renaming) can use the (possibly source-derived) alias,
+        # e.g. a synonym ``revenue`` grounded to ``sales.amount`` selects as
+        # ``amount``.
+        metric_aliases = metric_token_aliases(self.metrics, model, catalog, resolver)
         metrics: list[str] = []
         derived: list[dict[str, str]] = []
         for tok in self.metrics:
+            name, expr = _split_alias(tok)
             kind, a, b = _resolve_metric_token(tok, model, catalog, resolver)
             if kind == "metric":
                 metrics.append(a)
             else:
                 derived.append({"name": a, "expression": b})
+
+        order_by = _resolve_order_by(self.order_by, metric_aliases, model, resolver)
 
         dimensions: list[str] = []
         for d in self.dimensions:
@@ -94,7 +102,7 @@ class DslQuery:
             time_column=time_column,
             between_start=self.between_start,
             between_end=self.between_end,
-            order_by=self.order_by,
+            order_by=order_by,
             descending=self.descending,
             limit=self.limit,
             derivedMetrics=tuple(derived),
@@ -141,6 +149,62 @@ def _render_filter(f: DslFilter) -> str:
     if isinstance(value, (list, tuple)):
         return f"{_quote_ident(f.column)} IN (" + ", ".join(_render_value(v) for v in value) + ")"
     return f"{_quote_ident(f.column)} {f.op} {_render_value(value)}"
+
+
+def metric_token_aliases(
+    tokens: tuple[str, ...],
+    model: SemanticModel,
+    catalog: MetricCatalog | None,
+    resolver: NameResolver | None = None,
+) -> dict[str, str]:
+    """Map each DSL metric token to its output SELECT alias.
+
+    A base metric grounded to ``table.column`` selects under its source column
+    name; a calculated/inline metric selects under its declared name.
+    """
+    out: dict[str, str] = {}
+    for tok in tokens:
+        name, expr = _split_alias(tok)
+        if expr is not None:
+            out[tok] = name  # inline ``expr AS alias``
+            continue
+        kind, a, _ = _resolve_metric_token(tok, model, catalog, resolver)
+        if kind == "metric":
+            out[tok] = _column_of_ref(a, model)
+        else:
+            out[tok] = name
+    return out
+
+
+def _column_of_ref(ref: str, model: SemanticModel) -> str:
+    """Output SELECT alias for a base ``table.column`` ref (its column name)."""
+    for m in model.metrics:
+        if m.ref.lower() == ref.lower():
+            return m.column
+    return ref.split(".")[-1]
+
+
+def _resolve_order_by(
+    order_by: str | None,
+    metric_aliases: dict[str, str],
+    model: SemanticModel,
+    resolver: NameResolver | None,
+) -> str | None:
+    """Rewrite ORDER BY to the resolved metric alias or dimension ref.
+
+    A friendly/synonym metric (e.g. ``revenue``) is rewritten to its source
+    column alias (``amount``); a ``table.column`` ref token is left as-is; a
+    dimension token is grounded to its ref.
+    """
+    if order_by is None:
+        return None
+    if order_by in metric_aliases:
+        alias = metric_aliases[order_by]
+        if "." not in order_by:
+            return alias
+        return order_by
+    # Otherwise treat it as a dimension ref (grounded if a resolver is present).
+    return _resolve_dimension(order_by, model, resolver)
 
 
 def _split_alias(token: str) -> tuple[str, str | None]:
