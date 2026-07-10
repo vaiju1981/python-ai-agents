@@ -198,14 +198,36 @@ late events are absorbed correctly, and so control totals stay reconciled.
 
 ---
 
-## PR-14 — Incremental model / semantic refresh wired to ingest  ⬜ planned
+## PR-14 — Incremental model / semantic refresh wired to ingest  ✅ implemented
 
 **Why:** Even after rows land in DuckDB, the `SemanticModel` and the `DslEngine`
 grounding were built once from a full profile and will not reflect the new data
 until something refreshes them. This PR makes ingestion trigger an incremental
 profile merge + re-ground + cache re-key.
 
-**Implement:**
+**Status:** ✅ implemented (commit `PR-14`).
+
+**What shipped:**
+
+- `AnalyticsToolset` (`toolset.py`) now holds a live `DatasetProfile`
+  (`profile=` arg; built lazily on first refresh when omitted) and a cache of
+  `DslEngine` instances.
+- `refresh_after_ingest(delta_rows=None, decay=0.0)`: merges the arrived batch
+  via `profile_dataset_incremental` (PR-11, O(batch)), rebuilds the
+  `SemanticModel` via `SemanticModel.from_profile`, clears the cached DSL
+  engines, and returns the `row_count_aware=False` fingerprint (stable under
+  pure row growth → model cache not thrashed, PR-11). Relationship discovery
+  re-runs only on schema change, inside the A4 budget.
+- `AnalyticsToolset.ingest(...)`: one-call convenience that runs
+  `IngestController.ingest` (PR-13: idempotent upsert / watermark / metrics /
+  reconcile) then `refresh_after_ingest`, so a single ingest leaves the model
+  and engine consistent.
+- `dsl_query` now caches its engine on `self._dsl_engine_cache` (keyed by
+  synonyms) instead of a per-call local dict, so refresh can invalidate it.
+  `nl_query` always builds the engine from the current `self.model`, so it picks
+  up refreshes automatically.
+
+**Implement (original design as built):**
 
 - `AnalyticsToolset` (`toolset.py`): hold the live `DatasetProfile` and
   `SemanticModel`. Expose `refresh_after_ingest(delta_rows=None, decay=0.0)`

@@ -31,14 +31,90 @@ class AnalyticsToolset:
         model: SemanticModel,
         catalog: Any = None,
         lineage: Any = None,
+        profile: Any = None,
     ) -> None:
         self.source = source
         self.model = model
         self.catalog = catalog
+        # Optional live DatasetProfile (PR-14). When provided, ingest/refresh keep
+        # it — and the derived SemanticModel + cached DSL engines — in sync with
+        # arriving data. When None, it is built lazily on first refresh.
+        self._profile = profile
+        # Cached DslEngine instances keyed by synonyms repr (PR-14). Cleared on
+        # refresh so queries pick up the rebuilt model.
+        self._dsl_engine_cache: dict[Any, Any] = {}
         # Optional cross-answer lineage graph (PR-7). When set, every answer
         # records a node (answer id -> dataset_sig + sql + parents) and links to
         # the answers produced earlier in the same conversation.
         self.lineage = lineage
+
+    # --- incremental refresh (PR-14) ----------------------------------------
+
+    def refresh_after_ingest(
+        self, delta_rows: dict[str, Any] | None = None, decay: float = 0.0
+    ) -> str:
+        """Update the live profile + model + DSL engines as new data lands.
+
+        Merges the arrived batch (or re-profiles from the source when
+        ``delta_rows`` is None) via the incremental profiler (PR-11), rebuilds the
+        ``SemanticModel`` from the updated profile, and clears the cached
+        ``DslEngine`` instances so subsequent ``dsl_query`` / ``nl_query`` calls
+        use the new model. Returns the new dataset fingerprint
+        (``row_count_aware=False``), which is stable under pure row growth so the
+        model cache is not needlessly thrashed (PR-11).
+        """
+        from demos.analytics.src.analytics.dataset_fingerprint import fingerprint
+        from demos.analytics.src.analytics.profiler import (
+            profile_dataset,
+            profile_dataset_incremental,
+        )
+
+        if self._profile is None:
+            self._profile = profile_dataset(self.source, self.catalog)
+        self._profile = profile_dataset_incremental(
+            self.source,
+            prev=self._profile,
+            catalog=self.catalog,
+            new_rows=delta_rows,
+            decay=decay,
+        )
+        self.model = SemanticModel.from_profile(self._profile)
+        self._dsl_engine_cache.clear()
+        return fingerprint(self.source, row_count_aware=False)
+
+    def ingest(
+        self,
+        table: str,
+        rows: list[dict[str, Any]],
+        *,
+        mode: str = "upsert",
+        keys: list[str] | None = None,
+        time_column: str | None = None,
+        expected_rows: int | None = None,
+        reconcile: tuple[str, float, float] | None = None,
+        decay: float = 0.0,
+    ) -> Any:
+        """Ingest ``rows`` into ``table`` and refresh the model/engine in one call.
+
+        Delegates to ``IngestController`` (PR-13) for idempotent upsert / late-
+        arrival handling / metrics / reconcile, then calls
+        ``refresh_after_ingest`` so the semantic model and cached DSL engines
+        reflect the new data. Returns the ``UpsertResult``.
+        """
+        from demos.analytics.src.analytics.ingest import IngestController
+
+        controller = IngestController(self.source, self.model)
+        result = controller.ingest(
+            table,
+            rows,
+            mode=mode,
+            keys=keys,
+            time_column=time_column,
+            expected_rows=expected_rows,
+            reconcile=reconcile,
+        )
+        self.refresh_after_ingest(delta_rows={table: rows}, decay=decay)
+        return result
 
     def catalog_json(self) -> str:
         return self.model.catalog_json(self.source.tables(), self.catalog)
@@ -518,16 +594,14 @@ class AnalyticsToolset:
         returns the rows plus the planned SQL. Supports calculated metrics by
         name and the NL bridge (see ``nl_query``).
         """
-        cached: dict[bool, Any] = {}
-
         def _engine(synonyms: dict | None) -> Any:
             from demos.analytics.src.analytics.dsl.engine import DslEngine
 
-            if synonyms is None and None in cached:
-                return cached[None]
+            key = repr(synonyms)
+            if key in self._dsl_engine_cache:
+                return self._dsl_engine_cache[key]
             eng = DslEngine(self.source, self.model, catalog=self.catalog, synonyms=synonyms)
-            if synonyms is None:
-                cached[None] = eng
+            self._dsl_engine_cache[key] = eng
             return eng
 
         async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
