@@ -69,6 +69,9 @@ _SINCE_DATE_RE = re.compile(r"since\s+(\d{4}-\d{2}-\d{2})", re.IGNORECASE)
 _BETWEEN_RE = re.compile(
     r"between\s+(\d{4}-\d{2}-\d{2})\s+and\s+(\d{4}-\d{2}-\d{2})", re.IGNORECASE
 )
+_FILTER_RE = re.compile(
+    r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s+(?:is|are|equals|=)\s+([a-zA-Z0-9_]+)", re.IGNORECASE
+)
 
 
 class LocalEntityDetector:
@@ -100,8 +103,18 @@ class LocalEntityDetector:
             except Exception:
                 pass
 
+        # ---- filters: "<dimension> is/=/equals <value>" -------------------
+        filters: list[DslFilter] = []
+        for fm in _FILTER_RE.finditer(text):
+            dim_tok, val = fm.group(1), fm.group(2)
+            try:
+                resolver.resolve_dimension(dim_tok, model)
+            except Exception:
+                continue
+            filters.append(DslFilter(column=dim_tok, op="=", value=val))
+
         # ---- period --------------------------------------------------------
-        ent = Entities(metrics=metrics, dimensions=dimensions)
+        ent = Entities(metrics=metrics, dimensions=dimensions, filters=filters)
         m = _PERIOD_RE.search(text)
         if m:
             n = int(m.group(1))

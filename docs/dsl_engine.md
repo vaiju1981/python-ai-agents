@@ -274,6 +274,32 @@ execute it. This closes the loop: NL → entities → DSL → SQL → answer.
 
 ---
 
+## Usage example
+
+```python
+from demos.analytics.src.analytics.dsl import DslEngine, nl_to_dsl
+
+engine = DslEngine(source, model, synonyms={"revenue": "sales.amount"})
+result = engine.query("SELECT revenue BY region SINCE 30 days ORDER BY revenue DESC LIMIT 5")
+print(result.rows, result.sql, result.warnings)
+
+# Natural-language question (local detector, no external LLM):
+dsl = nl_to_dsl("show revenue by region for the last 30 days", engine)
+# Or expose it to an agent via the AnalyticsToolset tools `dsl_query` / `nl_query`.
+```
+
+## Caveats
+
+- **`BETWEEN` end date is exclusive** (`<`), matching half-open interval
+  conventions; use `SINCE` for inclusive trailing windows.
+- **Time windows assume UTC** (`current_timestamp AT TIME ZONE 'UTC'`). Data
+  stored in another timezone should be converted upstream or the `TimeColumn`
+  encoding adjusted.
+- **Value normalization** is a string→string map (`north` → `N`); custom logic
+  (e.g. date parsing) needs a callable normalizer, which is not yet wired.
+- **Best-effort caching** is keyed by `dataset_sig` + DSL text; it is disabled
+  when `best_effort=True` (a dropped table depends on live source state).
+
 ## Explicitly OUT OF SCOPE (handled elsewhere / later)
 
 - **Auth / multi-tenant scoping** of the DSL endpoint — owned by the fronting

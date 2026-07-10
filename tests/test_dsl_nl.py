@@ -24,6 +24,7 @@ import pytest
 
 from demos.analytics.src.analytics.csv_source import CsvSource
 from demos.analytics.src.analytics.dsl.engine import DslEngine
+from demos.analytics.src.analytics.dsl.grounding import NameResolver
 from demos.analytics.src.analytics.dsl.nl import (
     LLMEntityDetector,
     LocalEntityDetector,
@@ -122,6 +123,28 @@ def test_llm_detector_wiring_with_stub():
     dsl = nl_to_dsl("whatever the llm says", engine, detector=detector)
     result = engine.query(dsl)
     assert result.rows
+    src.close()
+
+
+def test_local_detector_extracts_filter():
+    df = _sales_df()
+    src = _csv_source("sales", df)
+    model = _sales_model()
+    engine = DslEngine(
+        src,
+        model,
+        synonyms=NameResolver(
+            synonyms={"revenue": "sales.amount", "region": "sales.region"},
+            value_synonyms={"sales.region": {"north": "N"}},
+        ),
+    )
+
+    dsl = nl_to_dsl("show revenue by region where region is north", engine)
+    assert "region" in dsl and "north" in dsl and "WHERE" in dsl.upper()
+
+    result = engine.query(dsl)
+    regions = {r["region"] for r in result.rows}
+    assert regions == {"N"}
     src.close()
 
 

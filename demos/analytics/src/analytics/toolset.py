@@ -510,6 +510,117 @@ class AnalyticsToolset:
             ),
         )
 
+    def dsl_query(self) -> Tool:
+        """Run a textual analytics DSL query through the generic DSL engine (PR-D4).
+
+        The engine parses -> grounds (business synonyms) -> plans -> executes the
+        query as safe, planner-generated SQL (no raw string interpolation), and
+        returns the rows plus the planned SQL. Supports calculated metrics by
+        name and the NL bridge (see ``nl_query``).
+        """
+        cached: dict[bool, Any] = {}
+
+        def _engine(synonyms: dict | None) -> Any:
+            from demos.analytics.src.analytics.dsl.engine import DslEngine
+
+            if synonyms is None and None in cached:
+                return cached[None]
+            eng = DslEngine(self.source, self.model, catalog=self.catalog, synonyms=synonyms)
+            if synonyms is None:
+                cached[None] = eng
+            return eng
+
+        async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
+            try:
+                dsl_text = arguments.get("dsl", "")
+                if not dsl_text.strip():
+                    return ToolResult.failed("dsl query text is required")
+                eng = _engine(arguments.get("synonyms"))
+                result = eng.query(dsl_text)
+                return self._ok(
+                    _frame("dsl_query", json.dumps(result.rows, default=str)[:MAX_RESULT_CHARS]),
+                    data=result.rows,
+                    sql=result.sql,
+                    row_count=len(result.rows),
+                    n=len(result.rows),
+                    coverage=1.0,
+                )
+            except Exception as exc:
+                return self._fail(f"dsl_query failed: {exc}")
+
+        return _make_tool(
+            "dsl_query",
+            "Run a textual analytics DSL query, e.g. 'SELECT revenue BY region SINCE 30 days "
+            "ORDER BY revenue DESC LIMIT 5'. Supports calculated metrics by name and business "
+            "synonyms (pass synonyms: {friendly: ref}). Read-only; returns rows + planned SQL.",
+            invoke,
+            _object_schema(
+                {
+                    "dsl": {"type": "string", "description": "The DSL query text."},
+                    "synonyms": {
+                        "type": "object",
+                        "description": "Optional friendly-name -> ref map (e.g. revenue).",
+                    },
+                },
+                required=("dsl",),
+            ),
+        )
+
+    def nl_query(self) -> Tool:
+        """Turn a natural-language question into DSL and execute it (PR-D5 bridge).
+
+        Uses the local entity detector (no external LLM dependency) to extract
+        metrics/dimensions/period, emits DSL text, then runs it through
+        ``dsl_query``. The LLM (if configured) only *proposes* the DSL; execution
+        is delegated to the engine.
+        """
+        async def invoke(arguments: dict[str, Any], context: Any) -> ToolResult:
+            try:
+                text = arguments.get("question", "")
+                if not text.strip():
+                    return ToolResult.failed("question text is required")
+                from demos.analytics.src.analytics.dsl.engine import DslEngine
+                from demos.analytics.src.analytics.dsl.nl import LocalEntityDetector, nl_to_dsl
+
+                eng = DslEngine(self.source, self.model, catalog=self.catalog,
+                                synonyms=arguments.get("synonyms"))
+                dsl_text = nl_to_dsl(text, eng, detector=LocalEntityDetector())
+                result = eng.query(dsl_text)
+                return self._ok(
+                    _frame(
+                        "nl_query",
+                        json.dumps(
+                            {"question": text, "dsl": dsl_text, "rows": result.rows},
+                            default=str,
+                        )[:MAX_RESULT_CHARS],
+                    ),
+                    data=result.rows,
+                    sql=result.sql,
+                    row_count=len(result.rows),
+                    n=len(result.rows),
+                    coverage=1.0,
+                )
+            except Exception as exc:
+                return self._fail(f"nl_query failed: {exc}")
+
+        return _make_tool(
+            "nl_query",
+            "Answer a natural-language analytics question, e.g. 'show revenue by region for the "
+            "last 30 days'. Extracts metrics/dimensions/period locally and runs safe DSL SQL. "
+            "Read-only.",
+            invoke,
+            _object_schema(
+                {
+                    "question": {"type": "string", "description": "The natural-language question."},
+                    "synonyms": {
+                        "type": "object",
+                        "description": "Optional friendly-name -> ref map.",
+                    },
+                },
+                required=("question",),
+            ),
+        )
+
     def all_tools(self) -> list[Tool]:
         return [
             self.describe_dataset(),
@@ -521,6 +632,8 @@ class AnalyticsToolset:
             self.outliers(),
             self.regression(),
             self.run_sql(),
+            self.dsl_query(),
+            self.nl_query(),
             self.event_impact(),
             self.change_point(),
             self.matched_impact(),

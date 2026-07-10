@@ -24,6 +24,7 @@ import pytest
 
 from demos.analytics.src.analytics.csv_source import CsvSource
 from demos.analytics.src.analytics.dsl.catalog import CalculatedMetricDef, MetricCatalog
+from demos.analytics.src.analytics.warehouse_sources import make_warehouse_source
 from demos.analytics.src.analytics.dsl.engine import DslEngine
 from demos.analytics.src.analytics.dsl.grounding import NameResolver
 from demos.analytics.src.analytics.semantic_model import (
@@ -200,5 +201,52 @@ def test_best_effort_drops_missing_table_with_warning():
     base = df.groupby("region")["amount"].sum().to_dict()
     got = {r["region"]: r["amount"] for r in result.rows}
     for region, total in base.items():
+        assert got[region] == pytest.approx(total)
+    src.close()
+
+
+def test_end_to_end_over_duckdb_warehouse():
+    """PR-D4 also requires E2E over a DuckDB ``warehouse_source`` (pushdown).
+
+    We write the table into a DuckDB file, attach it read-only as a warehouse
+    alias (``wh``), and point the semantic model at ``wh.sales`` so the engine's
+    SQL is pushed down to the attached warehouse.
+    """
+    import duckdb
+
+    df = _sales_df()
+    wh_dir = tempfile.mkdtemp(prefix="dsl_wh_")
+    wh_file = os.path.join(wh_dir, "warehouse.duckdb")
+    con = duckdb.connect(wh_file)
+    con.register("_sales_df", df)
+    con.execute(
+        'CREATE OR REPLACE TABLE sales AS '
+        'SELECT region, amount, quantity, CAST(day AS DATE) AS day FROM "_sales_df"'
+    )
+    con.close()
+
+    src = make_warehouse_source("duckdb", uri=wh_file, db_path=":memory:")
+
+    model = SemanticModel(
+        metrics=(
+            Metric(table="wh.sales", column="amount", aggregation="sum"),
+            Metric(table="wh.sales", column="quantity", aggregation="sum"),
+        ),
+        dimensions=(Dimension(table="wh.sales", column="region"),),
+        entity_keys=(),
+        time_columns=(TimeColumn(table="wh.sales", column="day", encoding="date"),),
+        relationships=(),
+    )
+    engine = DslEngine(src, model, synonyms={"revenue": "wh.sales.amount"})
+
+    result = engine.query(
+        "SELECT revenue BY region SINCE 30 days ORDER BY revenue DESC LIMIT 5"
+    )
+    assert result.warnings == []
+    assert result.rows
+
+    baseline = df.groupby("region")["amount"].sum().to_dict()
+    got = {r["region"]: r["revenue"] for r in result.rows}
+    for region, total in baseline.items():
         assert got[region] == pytest.approx(total)
     src.close()
