@@ -260,11 +260,32 @@ profile merge + re-ground + cache re-key.
 
 ---
 
-## PR-15 — Streaming connector / micro-batch writer + backfill  ⬜ planned
+## PR-15 — Streaming connector / micro-batch writer + backfill  ✅ implemented
+
+**Status:** ✅ implemented (commit `fa515f4`).
 
 **Why:** PR-12/13/14 define *how* a batch lands; this PR defines *where it comes
 from* — a connector that drains Kafka/Kinesis/CDC (or a watched delta-directory)
 into the ingest seam as micro-batches, plus replay/backfill for gaps.
+
+**What shipped:**
+
+- `Connector` protocol (`ingest.py`) with `poll` / `commit` / `close`; concrete
+  adapters `FileDeltaConnector` (watched `*.delta.csv` / `*.delta.parquet`
+  directory — the nightly-delta case), `KafkaConnector` (dependency-gated, like
+  `ollama` in `pyproject.toml`), and `CdcConnector` (wraps an arbitrary
+  change-feed callable into `Connector` for JDBC/Debezium-style feeds).
+- `MicroBatchRunner` (`ingest.py`): the drain loop `poll → ingest (PR-13 upsert +
+  PR-14 refresh) → emit per-batch metrics → optional freshness gate (PR-16) →
+  commit offsets`. It owns the single writer (DuckDB is single-writer); reads use
+  the source's per-query read-only connections, so ingest and serve don't contend.
+- `_coerce_rows` / `_emit_lag` in the runner: delta rows arrive as loosely-typed
+  text, so they are cast to the live table's column types (DATE / TIMESTAMP /
+  numeric / boolean) before ingest, and a `analytics.ingest.batch.lag_seconds`
+  metric is emitted from the batch's max event time.
+
+**Verify (E2E):** `tests/test_ingestion_connector.py` (6 passed, 1 Kafka test
+skipped without a broker / the `kafka` package).
 
 **Implement:**
 
@@ -298,10 +319,45 @@ into the ingest seam as micro-batches, plus replay/backfill for gaps.
 
 ---
 
-## PR-16 — Schema evolution + freshness gate  ⬜ planned
+## PR-16 — Schema evolution + freshness gate  ✅ implemented
+
+**Status:** ✅ implemented (commit `82e8a35`).
 
 **Why:** Streams add/retire columns and go stale. We need to evolve the schema
 safely and to stop serving answers against data older than a policy.
+
+**What shipped:**
+
+- **Schema evolution** (`csv_source.py`): `append_rows` / `upsert` / `ingest_csv`
+  now call `_evolve_schema`, which `ALTER TABLE <t> ADD COLUMN` for any column
+  present in the arriving batch but missing from the live table (typed from the
+  batch — VARCHAR / BIGINT / DOUBLE / BOOLEAN / DATE / TIMESTAMP). Retired
+  columns are left in place (additive, backward-compatible). The batch column
+  list is the union across all rows, so a new column arriving in only some rows
+  still lands. `upsert`'s insert now uses an explicit column list, so partial
+  batches and post-evolution tables with extra columns land correctly.
+- **Freshness gate** (`freshness.py` + `toolset.py`): `ANALYTICS_MAX_STALE_DAYS`
+  (per-table override available via `freshness()`) drives a per-table `stale`
+  flag; the `FreshnessReport` carries `maxStaleDays`. `run_sql` / `dsl_query` /
+  `nl_query` plan without executing, extract the referenced tables, and — when
+  the policy is set and a table is staler than allowed — return a structured
+  `"stale"` result (with the staleness note) instead of a silent number. An
+  explicit `allow_stale=True` argument overrides the gate.
+- **Auto-window** (`toolset.py` `trend`): a trailing-window query with no
+  explicit date filter anchors its lower bound at the table's high-water mark
+  (`SELECT MAX(<ts_expr>)`) instead of wall-clock `now`, so in-window late rows
+  are included transparently. Works for epoch-encoded time columns.
+
+**Verify (E2E):** `tests/test_ingestion_schema_freshness.py`
+
+- Ingest a batch with a new column → `ALTER` applied, column queryable, model
+  updated (no full reload), `dsl_query` can group by it; a partial batch does not
+  drop retired columns.
+- `ANALYTICS_MAX_STALE_DAYS=0` with no new data → `dsl_query` / `run_sql` return
+  a "stale" structured result; with `allow_stale=True` they answer.
+- Auto-window: a `trend` query without a date filter aggregates up to the
+  watermark (inclusive of in-window late rows), and matches `now`-anchoring for
+  fresh data.
 
 **Implement:**
 
