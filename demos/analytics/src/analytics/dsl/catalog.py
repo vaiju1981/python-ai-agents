@@ -135,6 +135,11 @@ class MetricCatalog:
                 return m
         return None
 
+    def expand(self, expr: str, model: SemanticModel) -> str:
+        """Public: substitute catalog metric names in ``expr`` with their
+        aggregated SQL (used by the DSL parser for inline ``expr AS alias``)."""
+        return self._expand(expr, model, set())
+
     def _expand(self, expr: str, model: SemanticModel, seen: set[str]) -> str:
         # Only resolve the catalog names that actually appear in the expression.
         tokens = {m.group(0).lower() for m in _TOKEN.finditer(expr) if "." not in m.group(0)}
