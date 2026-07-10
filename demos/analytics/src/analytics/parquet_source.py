@@ -12,6 +12,7 @@ from demos.analytics.src.analytics.data_source import (
     DataSource,
     Relationship,
     TableSchema,
+    UpsertResult,
     sql_literal,
     sql_quote,
 )
@@ -77,13 +78,27 @@ class ParquetSource(DataSource):
             f"SELECT COUNT(*) FROM {sql_quote(safe_name)}"
         ).fetchone()[0]
 
+    def primary_keys(self, table: str) -> list[str]:
+        return []
+
+    def time_column(self, table: str) -> str | None:
+        return None
+
     def append_rows(self, table: str, rows: list[dict[str, Any]]) -> int:
         raise NotImplementedError("ParquetSource is read-only; use CsvSource for ingestion (PR-12)")
 
     def ingest_csv(self, table: str, csv_path: Path, *, mode: str = "append") -> int:
         raise NotImplementedError("ParquetSource is read-only; use CsvSource for ingestion (PR-12)")
 
-    def upsert(self, table: str, rows: list[dict[str, Any]], keys: list[str]) -> int:
+    def upsert(
+        self,
+        table: str,
+        rows: list[dict[str, Any]],
+        keys: list[str],
+        *,
+        time_column: str | None = None,
+        late_window: float | None = None,
+    ) -> UpsertResult:
         raise NotImplementedError("ParquetSource is read-only; use CsvSource for ingestion (PR-12)")
 
     def close(self) -> None:

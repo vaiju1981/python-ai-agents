@@ -57,6 +57,26 @@ class Relationship:
         return self.to_columns[0]
 
 
+@dataclass
+class UpsertResult:
+    """Outcome of an idempotent upsert (PR-13).
+
+    ``inserted`` / ``updated`` count rows written; ``late_rejected`` counts rows
+    dropped because their event time fell outside the lateness window of the
+    high-water mark; ``watermark`` is the table's current high-water mark (max
+    event time seen), or ``None`` when no temporal column is in play.
+    """
+
+    inserted: int = 0
+    updated: int = 0
+    late_rejected: int = 0
+    watermark: Any | None = None
+
+    @property
+    def written(self) -> int:
+        return self.inserted + self.updated
+
+
 class DataSource(Protocol):
     """Pluggable seam for any tabular data backend."""
 
@@ -81,10 +101,20 @@ class DataSource(Protocol):
     ) -> int: ...
 
     def upsert(
-        self, table: str, rows: list[dict[str, Any]], keys: list[str]
-    ) -> int: ...
+        self,
+        table: str,
+        rows: list[dict[str, Any]],
+        keys: list[str],
+        *,
+        time_column: str | None = None,
+        late_window: float | None = None,
+    ) -> UpsertResult: ...
 
     def row_count(self, table: str) -> int: ...
+
+    def primary_keys(self, table: str) -> list[str]: ...
+
+    def time_column(self, table: str) -> str | None: ...
 
     def close(self) -> None: ...
 

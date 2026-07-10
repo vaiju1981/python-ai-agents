@@ -132,12 +132,12 @@ def test_upsert_skips_existing_keys(tmp_path):
     try:
         # Re-deliver an existing row (id=1) plus a new one (id=4): only the new
         # row should be added.
-        added = src.upsert(
+        res = src.upsert(
             "sales",
             [{"id": 1, "region": "north", "amount": 10}, {"id": 4, "region": "west", "amount": 40}],
             keys=["id"],
         )
-        assert added == 1
+        assert res.inserted == 1
         assert src.row_count("sales") == 4
         # The duplicate id=1 did not create a second copy.
         dupes = src.native_query("SELECT id FROM sales WHERE id = 1")

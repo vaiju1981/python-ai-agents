@@ -136,13 +136,34 @@ reading files.
 
 ---
 
-## PR-13 — Idempotent upsert, dedup & late-arrival watermark  ⬜ planned
+## PR-13 — Idempotent upsert, dedup & late-arrival watermark  ✅ implemented
 
 **Why:** A firehose repeats and reorders. Naive `append_rows` double-counts and
 pollutes aggregates. We need a primary key + a watermark so re-delivered or
 late events are absorbed correctly, and so control totals stay reconciled.
 
-**Implement:**
+**Status:** ✅ implemented (commit `PR-13`).
+
+**What shipped:**
+
+- `DataSource` protocol gains `primary_keys(table)` and `time_column(table)`
+  (read-only sources return `[]` / `None`); `upsert` now takes `time_column` /
+  `late_window` and returns a `UpsertResult` (inserted / updated / late_rejected
+  / watermark) — defined in `data_source.py`.
+- `CsvSource` (`csv_source.py`): `upsert` performs a true merge — existing keys
+  are **updated**, new keys **inserted**; a per-table high-water mark is tracked
+  and rows whose event time is older than `watermark - late_window` days are
+  rejected as too-late. Late rejection applies only to *new* rows: backfilling /
+  updating an existing key is always allowed. `late_window` defaults to
+  `ANALYTICS_LATE_WINDOW` (1 day).
+- `ingest.py` → `IngestController`: resolves keys / time column from an explicit
+  argument, else the `SemanticModel` (identifier dimensions / time columns), else
+  the source heuristics; emits `analytics.ingest.rows` / `late_rejected` /
+  `errors` / `reconcile_diff` (+ `reconcile_breach`) via the `metrics` facade
+  (PR-4); and runs automated reconcile against an `expected_rows` control total
+  (or a `(metric_ref, expected, tolerance)` source-of-truth metric).
+
+**Implement (original design as built):**
 
 - **Key detection:** reuse the profiler's role hints — columns classified as
   `IDENTIFIER` (`data_source.ColumnRole.IDENTIFIER`) are candidate keys. Provide
