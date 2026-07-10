@@ -54,20 +54,23 @@ def _tokenize(text: str) -> list[Tok]:
         if c.isspace():
             i += 1
             continue
-        if c == "'":
+        if c in ("'", '"'):
+            quote = c
             j, buf = i + 1, []
             while j < n:
                 if text[j] == "\\" and j + 1 < n:
                     buf.append(text[j + 1])
                     j += 2
                     continue
-                if text[j] == "'":
+                if text[j] == quote:
                     break
                 buf.append(text[j])
                 j += 1
             if j >= n:
                 raise DslParseError("unterminated string literal")
-            tokens.append(Tok("STR", "".join(buf)))
+            # Double-quoted strings are identifiers (multi-word metric/dim names);
+            # single-quoted strings are scalar values.
+            tokens.append(Tok("ID" if quote == '"' else "STR", "".join(buf)))
             i = j + 1
             continue
         if c.isdigit() or (c == "." and i + 1 < n and text[i + 1].isdigit()):
@@ -137,7 +140,7 @@ class _Parser:
     def expect_id(self, word: str | None = None) -> Tok:
         t = self.peek()
         if t is None or t.kind != "ID":
-            raise DslParseError(f"expected identifier" + (f" '{word}'" if word else ""))
+            raise DslParseError("expected identifier" + (f" '{word}'" if word else ""))
         if word is not None and t.text.lower() != word:
             raise DslParseError(f"expected '{word}' but got '{t.text}'")
         return self.next()
@@ -208,7 +211,6 @@ class _Parser:
         return out
 
     def parse_metric(self) -> str:
-        start = self.i
         text, compound = self.parse_expr()
         alias = None
         if self.peek_kw("as"):

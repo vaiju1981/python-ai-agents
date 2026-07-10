@@ -163,7 +163,7 @@ as text and get a validated IR.
 
 ---
 
-## PR-D3 — Name grounding / synonym resolver
+## PR-D3 — Name grounding / synonym resolver  ✅ implemented
 
 **Why:** Callers (and the NL bridge, PR-D5) use friendly names
 (`revenue`, `region`, `last 30 days`), not `sales.amount` / `sales.region`.

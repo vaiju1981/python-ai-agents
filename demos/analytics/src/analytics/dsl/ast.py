@@ -11,14 +11,14 @@ built in PR-D1.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from demos.analytics.src.analytics.dsl.catalog import (
     BaseMetricDef,
-    CalculatedMetricDef,
     MetricCatalog,
 )
-from demos.analytics.src.analytics.semantic_model import Dimension, Metric, SemanticModel
+from demos.analytics.src.analytics.dsl.grounding import NameResolver
+from demos.analytics.src.analytics.semantic_model import Metric, SemanticModel
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,21 +41,28 @@ class DslQuery:
     descending: bool = True
     limit: int | None = None
 
-    def to_spec(self, model: SemanticModel, catalog: MetricCatalog | None = None):
+    def to_spec(
+        self,
+        model: SemanticModel,
+        catalog: MetricCatalog | None = None,
+        resolver: NameResolver | None = None,
+    ):
         """Compile this DSL query into a ``query_planner.QuerySpec``.
 
         Metric tokens are resolved through the catalog (PR-D1): a base metric
         becomes a plain ``table.column`` ref; a calculated metric (or an inline
         ``expr AS alias``) becomes a ``derivedMetrics`` entry whose expression is
         already expanded to additive-safe aggregated SQL. Dimensions and the time
-        column are resolved against the ``SemanticModel``.
+        column are resolved against the ``SemanticModel``. When a ``resolver``
+        (PR-D3) is supplied, friendly names are grounded *before* catalog/model
+        resolution, and filter values are normalized per-dimension.
         """
         from demos.analytics.src.analytics.query_planner import Filter, QuerySpec
 
         metrics: list[str] = []
         derived: list[dict[str, str]] = []
         for tok in self.metrics:
-            kind, a, b = _resolve_metric_token(tok, model, catalog)
+            kind, a, b = _resolve_metric_token(tok, model, catalog, resolver)
             if kind == "metric":
                 metrics.append(a)
             else:
@@ -63,9 +70,16 @@ class DslQuery:
 
         dimensions: list[str] = []
         for d in self.dimensions:
-            dimensions.append(_resolve_dimension(d, model))
+            dimensions.append(_resolve_dimension(d, model, resolver))
 
-        filters = tuple(Filter(column=f.column, op=f.op, value=f.value) for f in self.filters)
+        filters = tuple(
+            Filter(
+                column=_resolve_column(f.column, model, resolver),
+                op=f.op,
+                value=_normalize_value(f.column, f.value, model, resolver),
+            )
+            for f in self.filters
+        )
 
         time_column = self.time_column
         if time_column is None and (self.last_days is not None or self.between_start is not None):
@@ -88,9 +102,9 @@ class DslQuery:
 
     def to_text(self) -> str:
         """Render a canonical, normalized form of the query (round-trip)."""
-        parts: list[str] = ["SELECT " + ", ".join(self.metrics)]
+        parts: list[str] = ["SELECT " + ", ".join(_quote_ident(m) for m in self.metrics)]
         if self.dimensions:
-            parts.append("BY " + ", ".join(self.dimensions))
+            parts.append("BY " + ", ".join(_quote_ident(d) for d in self.dimensions))
         if self.filters:
             parts.append("WHERE " + " AND ".join(_render_filter(f) for f in self.filters))
         if self.last_days is not None:
@@ -114,11 +128,19 @@ def _render_value(value: str) -> str:
     return "'" + value.replace("'", "\\'") + "'"
 
 
-def _render_filter(f: "DslFilter") -> str:
+def _quote_ident(s: str) -> str:
+    """Quote an identifier (metric/dimension/alias) for round-trip if it is not a
+    single bare token (e.g. a multi-word business name like ``net win``)."""
+    if s and (s[0].isalpha() or s[0] == "_") and all(c.isalnum() or c == "_" for c in s):
+        return s
+    return '"' + s.replace('"', '\\"') + '"'
+
+
+def _render_filter(f: DslFilter) -> str:
     value = f.value
     if isinstance(value, (list, tuple)):
-        return f"{f.column} IN (" + ", ".join(_render_value(v) for v in value) + ")"
-    return f"{f.column} {f.op} {_render_value(value)}"
+        return f"{_quote_ident(f.column)} IN (" + ", ".join(_render_value(v) for v in value) + ")"
+    return f"{_quote_ident(f.column)} {f.op} {_render_value(value)}"
 
 
 def _split_alias(token: str) -> tuple[str, str | None]:
@@ -138,18 +160,25 @@ def _base_from_model(model: SemanticModel, name: str) -> Metric | None:
 
 
 def _resolve_metric_token(
-    token: str, model: SemanticModel, catalog: MetricCatalog | None
+    token: str,
+    model: SemanticModel,
+    catalog: MetricCatalog | None,
+    resolver: NameResolver | None = None,
 ) -> tuple[str, str, str]:
     """Return (kind, a, b): kind 'metric' -> (_, ref, _); 'derived' -> (_, name, sql)."""
     name, expr = _split_alias(token)
     if expr is None:
-        if catalog is not None:
+        if resolver is not None:
+            defn = resolver.resolve_metric(name, catalog, model)
+        elif catalog is not None:
             defn = catalog.get(name)
-            if defn is not None:
-                if isinstance(defn, BaseMetricDef):
-                    return ("metric", defn.ref, "")
-                sql, _ = catalog.resolve(name, model)
-                return ("derived", name, sql)
+        else:
+            defn = None
+        if defn is not None:
+            if isinstance(defn, BaseMetricDef):
+                return ("metric", f"{defn.table}.{defn.column}", "")
+            sql, _ = catalog.resolve(defn.name, model)
+            return ("derived", defn.name, sql)
         base = _base_from_model(model, name)
         if base is not None:
             return ("metric", base.ref, "")
@@ -164,7 +193,11 @@ def _resolve_metric_token(
     return ("derived", name, expression)
 
 
-def _resolve_dimension(token: str, model: SemanticModel) -> str:
+def _resolve_dimension(
+    token: str, model: SemanticModel, resolver: NameResolver | None = None
+) -> str:
+    if resolver is not None:
+        return resolver.resolve_dimension(token, model).ref
     nl = token.lower()
     for d in model.dimensions:
         if d.ref.lower() == nl or d.column.lower() == nl:
@@ -172,3 +205,48 @@ def _resolve_dimension(token: str, model: SemanticModel) -> str:
     from demos.analytics.src.analytics.dsl.parser import DslParseError
 
     raise DslParseError(f"unknown dimension '{token}'")
+
+
+def _resolve_column(
+    token: str, model: SemanticModel, resolver: NameResolver | None = None
+) -> str:
+    """Resolve a filter/operand column to its qualified ``table.column`` ref.
+
+    Falls back to the bare token when it matches no known dimension or metric
+    (e.g. a metric-ref filter like ``sales.amount`` that is not a dimension).
+    """
+    if resolver is not None:
+        try:
+            return resolver.resolve_dimension(token, model).ref
+        except Exception:
+            pass
+    nl = token.lower()
+    for d in model.dimensions:
+        if d.ref.lower() == nl or d.column.lower() == nl:
+            return d.ref
+    for m in model.metrics:
+        if m.ref.lower() == nl or m.column.lower() == nl:
+            return m.ref
+    return token
+
+
+def _normalize_value(
+    column_token: str,
+    value: str | list[str],
+    model: SemanticModel,
+    resolver: NameResolver | None,
+) -> str | list[str]:
+    """Normalize a filter literal via the per-dimension value map, if any.
+
+    Only applies when ``column_token`` resolves to a known dimension; metric-ref
+    filters are passed through untouched.
+    """
+    if resolver is None:
+        return value
+    try:
+        dim_ref = resolver.resolve_dimension(column_token, model).ref
+    except Exception:
+        dim_ref = _resolve_dimension(column_token, model)
+    if isinstance(value, (list, tuple)):
+        return [resolver.resolve_value(dim_ref, v) for v in value]
+    return resolver.resolve_value(dim_ref, value)
