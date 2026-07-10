@@ -13,6 +13,8 @@ underlying DuckDB connection also disables external file access after import.
 
 from __future__ import annotations
 
+import re
+
 _ALLOWED_TYPES = ("Select", "Show", "Describe", "Explain", "Values")
 # Statement/expression types that are never allowed through run_sql.
 _FORBIDDEN_TYPES = (
@@ -34,10 +36,24 @@ _FORBIDDEN_TYPES = (
 )
 # Bare function names that read from disk / external systems.
 _FORBIDDEN_FUNCS = {"read_csv", "read_csv_auto", "read_parquet", "read_json", "read_blob"}
+# Parser-independent guard: file-reading table functions written as
+# ``FROM read_csv('/etc/passwd')`` parse as a Table (not a Func), so the AST
+# check above alone can miss them when sqlglot is absent or fails to parse.
+# This regex catches the call form regardless of the parser.
+_FILE_READ_RE = re.compile(
+    r"\b(?:read_csv|read_csv_auto|read_parquet|read_parquet_auto|"
+    r"read_json|read_json_auto|read_blob)\s*\(",
+    re.IGNORECASE,
+)
 
 
 def safe_sql_error(sql: str) -> str | None:
     """Return an error message if ``sql`` is not a safe read-only query, else None."""
+    # Fast, parser-independent block on file-reading table functions. This works
+    # even when sqlglot is not installed (the AST path below would be skipped).
+    if _FILE_READ_RE.search(sql):
+        return "forbidden SQL function: file read (read_csv/read_parquet/read_json/...)"
+
     try:
         import sqlglot
     except Exception:
