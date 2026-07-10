@@ -32,6 +32,8 @@ from demos.analytics.src.analytics.toolset import (
     _object_schema,
     _string_array,
 )
+from demos.analytics.src.analytics.train_backend import TrainBackend, get_train_backend
+from demos.analytics.src.analytics.warehouse_sources import score_warehouse
 from python_ai_agents.core.tool import Tool, ToolResult
 
 _MIN_ROWS = 20
@@ -61,6 +63,7 @@ class ModelsToolset:
         model_ttl: float | None = None,
         max_train_rows: int | None = None,
         lineage: Any = None,
+        train_backend: Any = None,
     ) -> None:
         self.source = source
         self.model = model
@@ -77,6 +80,11 @@ class ModelsToolset:
         # (reservoir sample) so the user can trade accuracy for speed on big data.
         self.max_train_rows = (
             max_train_rows if max_train_rows is not None else _DEFAULT_MAX_TRAIN_ROWS
+        )
+        # Pluggable training backend (PR-10). Controls whether row-level models
+        # train on a reservoir sample (default) or the full population / out-of-core.
+        self.train_backend: TrainBackend = (
+            train_backend if train_backend is not None else get_train_backend()
         )
         # Optional cross-answer lineage graph (PR-7); shared with the descriptive
         # toolset so a forecast can link back to the reconcile it was built from.
@@ -170,7 +178,7 @@ class ModelsToolset:
         if not pred_cols:
             raise ValueError("no predictors available for the target")
 
-        df = self._assemble_features(t_table, t_col, pred_cols)
+        df = self._assemble_features(t_table, t_col, pred_cols, for_training=True)
         x = (
             df[[c for (_t, c) in pred_cols]]
             .apply(pd.to_numeric, errors="coerce")
@@ -255,6 +263,14 @@ class ModelsToolset:
             t_table, t_col, pred_cols, fitted, meta, cached, trained_at = self._train_or_load(args)
             feature_cols = [c for (_t, c) in pred_cols]
             filters = list(args.get("filters") or [])
+
+            # Warehouse path: push scoring to the warehouse when the model is
+            # expressible (linear) so we never materialize the scored frame.
+            wh = self._predict_in_warehouse(t_table, t_col, pred_cols, fitted, meta, filters)
+            if wh is not None:
+                return wh
+
+            # Local fallback (tree/RF, classification, or a non-warehouse source).
             score_df = self._assemble_features(t_table, t_col, pred_cols, filters=filters)
             score_df = score_df.apply(pd.to_numeric, errors="coerce").dropna()
             if score_df.empty:
@@ -310,8 +326,82 @@ class ModelsToolset:
             ),
         )
 
+    def _predict_in_warehouse(
+        self,
+        t_table: str,
+        t_col: str,
+        pred_cols: list[tuple[str, str]],
+        fitted: Any,
+        meta: dict[str, Any],
+        filters: list[dict[str, Any]],
+    ) -> ToolResult | None:
+        """Score in-warehouse when the model is expressible (linear regression).
+
+        Returns a ToolResult if the warehouse could express the model, else
+        ``None`` so the caller falls back to the local bounded-sample path. The
+        frame is never materialized into the Python process — predictions and
+        drift are computed with aggregate SQL on the warehouse.
+
+        Only runs for an actual warehouse source (``make_warehouse_source``);
+        local/CSV sources keep their existing local predict behavior.
+        """
+        if not getattr(self.source, "_is_warehouse", False):
+            return None
+        if meta.get("task") != "regression":
+            return None
+        feature_cols = [c for (_t, c) in pred_cols]
+        frame_sql = self._feature_frame_sql(t_table, t_col, pred_cols, filters=filters)
+        score_sql = score_warehouse(self.source, frame_sql, fitted, feature_cols, task="regression")
+        if score_sql is None:
+            return None
+        agg = self.source.native_query(
+            f"SELECT COUNT(*) AS n, AVG(prediction) AS mean, "
+            f"MIN(prediction) AS min, MAX(prediction) AS max "
+            f"FROM ({score_sql}) AS _s"
+        )
+        if not agg or int(agg[0]["n"]) == 0:
+            return ToolResult.failed("no rows to score after filters")
+        row = agg[0]
+        summary = {
+            "mean": round(float(row["mean"]), 4),
+            "min": round(float(row["min"]), 4),
+            "max": round(float(row["max"]), 4),
+        }
+        payload = {
+            "target": t_col,
+            "task": meta.get("task"),
+            "n_scored": int(row["n"]),
+            "prediction": summary,
+            "scored_in_warehouse": True,
+            "drift": self._warehouse_drift(frame_sql, feature_cols, meta),
+            "method": "in-warehouse SQL scoring (linear); build_model(retrain=true) refreshes it",
+        }
+        return self._ok("predict", payload, data=payload)
+
+    def _warehouse_drift(
+        self, frame_sql: str, feature_cols: list[str], meta: dict[str, Any]
+    ) -> Any:
+        """Per-feature mean-shift drift computed with aggregate SQL (no materialization)."""
+        sel = ", ".join(f"AVG({sql_qcol('_f', c)}) AS {sql_quote(c)}" for c in feature_cols)
+        sql = f"SELECT {sel} FROM ({frame_sql}) AS _f"
+        row = self.source.native_query(sql)
+        if not row:
+            return {"checked": False, "note": "no rows"}
+        vals = {c: float(row[0].get(c) or 0.0) for c in feature_cols}
+        import pandas as pd
+
+        df = pd.DataFrame({c: [vals[c]] for c in feature_cols})
+        train_stats = meta.get("train_stats") or {}
+        reduced = {
+            c: {
+                "mean": (train_stats.get(c) or {}).get("mean", 0.0),
+                "std": (train_stats.get(c) or {}).get("std", 0.0),
+            }
+            for c in feature_cols
+        }
+        return _drift_check(reduced, df, feature_cols)
+
     def _fit(self, y: Any, x: Any, pcols: list[str], is_clf: bool) -> tuple[dict[str, Any], Any]:
-        xv = x.astype(float).values
         # Per-feature training stats travel with the model so `predict` can flag
         # drift. We keep mean/std (fast mean-shift) plus decile edges + a value
         # sample so serving can compute PSI and a KS test against training.
@@ -324,37 +414,39 @@ class ModelsToolset:
             }
             for c in pcols
         }
+        algo = "random_forest_classifier" if is_clf else "random_forest_regressor"
+        res = self.train_backend.fit(y=y, x=x, feature_cols=pcols, is_clf=is_clf, algo=algo)
+        model = res.model
+        xv = x.astype(float).values
         if is_clf:
-            from sklearn.ensemble import RandomForestClassifier
-
             codes, uniques = _encode(y)
             n_classes = len(uniques)
-            model = RandomForestClassifier(n_estimators=200, random_state=0)
-            model.fit(xv, codes)
-            score = _safe_cv(model, xv, codes, "accuracy", is_clf=True)
+            # Backends that train out-of-core may return their own CV; otherwise
+            # compute it here on the (in-memory) training frame.
+            score = (
+                res.cv
+                if res.cv is not None
+                else _safe_cv(model, xv, codes, "accuracy", is_clf=True)
+            )
             return {
                 "task": "classification",
                 "n_rows": int(len(y)),
                 "n_classes": int(n_classes),
                 "classes": [str(u) for u in uniques],
                 "cv_accuracy": score,
-                "feature_importance": _importances(pcols, model.feature_importances_),
+                "feature_importance": res.feature_importance or [],
                 "train_stats": train_stats,
-                "method": "RandomForestClassifier, 5-fold CV accuracy on historical data",
+                "method": res.method or "RandomForestClassifier, 5-fold CV accuracy",
             }, model
-        from sklearn.ensemble import RandomForestRegressor
-
         yv = y.astype(float).values
-        model = RandomForestRegressor(n_estimators=200, random_state=0)
-        model.fit(xv, yv)
-        score = _safe_cv(model, xv, yv, "r2", is_clf=False)
+        score = res.cv if res.cv is not None else _safe_cv(model, xv, yv, "r2", is_clf=False)
         return {
             "task": "regression",
             "n_rows": int(len(y)),
             "cv_r2": score,
-            "feature_importance": _importances(pcols, model.feature_importances_),
+            "feature_importance": res.feature_importance or [],
             "train_stats": train_stats,
-            "method": "RandomForestRegressor, 5-fold CV R^2 on historical data",
+            "method": res.method or "RandomForestRegressor, 5-fold CV R^2",
         }, model
 
     # -- forecast -------------------------------------------------------------
@@ -767,21 +859,18 @@ class ModelsToolset:
             sql = f"SELECT * FROM ({sql}) USING SAMPLE {int(cap)} ROWS"
         return pd.DataFrame(self.source.native_query(sql))
 
-    def _assemble_features(
+    def _feature_frame_sql(
         self,
         target_table: str,
         target_col: str,
         pred_cols: list[tuple[str, str]],
         filters: list[dict[str, Any]] | None = None,
-    ) -> Any:
-        """Row-grain feature frame for modeling: join ``target_table`` to related
-        tables (via discovered relationships) and select the target + predictors.
+    ) -> str:
+        """SQL for the row-grain feature frame (target + predictors), no sampling.
 
-        Unlike ``_frame`` (single table), this assembles predictors that live in
-        *other* tables, so a model can use features from across the dataset.
+        Used by both the local path (which materializes a bounded sample) and the
+        warehouse path (which scores the full frame in-warehouse).
         """
-        import pandas as pd
-
         cols = [(target_table, target_col), *pred_cols]
         sql = feature_frame_sql(self.model, target_table, cols)
         if filters:
@@ -799,10 +888,37 @@ class ModelsToolset:
                 clauses.append(f"{sql_qcol(target_table, f_col)} {op} '{lit}'")
             if clauses:
                 sql += " WHERE " + " AND ".join(clauses)
+        return sql
+
+    def _assemble_features(
+        self,
+        target_table: str,
+        target_col: str,
+        pred_cols: list[tuple[str, str]],
+        filters: list[dict[str, Any]] | None = None,
+        *,
+        for_training: bool = False,
+    ) -> Any:
+        """Row-grain feature frame for modeling: join ``target_table`` to related
+        tables (via discovered relationships) and select the target + predictors.
+
+        Unlike ``_frame`` (single table), this assembles predictors that live in
+        *other* tables, so a model can use features from across the dataset.
+
+        When ``for_training`` and the configured ``train_backend`` trains on the
+        full population (PR-10), the reservoir row cap is skipped so the model is
+        fit on every row. Serving/predict keeps the cap for speed.
+        """
+        import pandas as pd
+
+        sql = self._feature_frame_sql(target_table, target_col, pred_cols, filters=filters)
         # Honor the user's row cap (reservoir sample) so big data can trade
         # accuracy for speed; matches the sampling already done in ``_frame``.
-        if self.max_train_rows:
-            sql = f"SELECT * FROM ({sql}) USING SAMPLE {int(self.max_train_rows)} ROWS"
+        cap = self.max_train_rows
+        if for_training and getattr(self.train_backend, "uses_full_population", False):
+            cap = None
+        if cap:
+            sql = f"SELECT * FROM ({sql}) USING SAMPLE {int(cap)} ROWS"
         return pd.DataFrame(self.source.native_query(sql))
 
     @staticmethod

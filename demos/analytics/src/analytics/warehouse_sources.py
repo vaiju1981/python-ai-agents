@@ -13,7 +13,9 @@ from a *secret name* at runtime and is never logged or written into provenance.
 from __future__ import annotations
 
 import re
+from typing import Any
 
+from demos.analytics.src.analytics.data_source import sql_qcol
 from demos.analytics.src.analytics.secrets import (
     EnvSecretProvider,
     SecretProvider,
@@ -76,7 +78,11 @@ def make_warehouse_source(
     )
     conn_str = template.format(uri=resolved)
     try:
-        return SqlSource(db_path=db_path, attach={alias: conn_str})
+        src = SqlSource(db_path=db_path, attach={alias: conn_str})
+        # Mark so the serving layer only pushes scoring to an actual warehouse
+        # (PR-8) and never rewrites local/CSV predict behavior.
+        src._is_warehouse = True  # type: ignore[attr-defined]
+        return src
     except Exception as exc:  # pragma: no cover - depends on installed DuckDB extensions
         raise RuntimeError(
             f"could not attach {kind} warehouse (is the DuckDB "
@@ -86,3 +92,41 @@ def make_warehouse_source(
 
 def available_kinds() -> list[str]:
     return sorted(_ATTACH_TEMPLATES)
+
+
+def score_warehouse(
+    source: Any,
+    frame_sql: str,
+    model: Any,
+    feature_cols: list[str],
+    *,
+    task: str | None = None,
+) -> str | None:
+    """Emit in-warehouse SQL that scores ``frame_sql`` with a trained ``model``.
+
+    Returns a SQL ``SELECT`` computing one prediction per row (alias
+    ``prediction``), or ``None`` when the warehouse can't express the model:
+
+    - linear models (``coef_`` + ``intercept_``) -> exact arithmetic SQL
+      (``intercept + sum(coef_i * col_i)``), which matches local pandas scoring;
+    - classification linear models -> ``None`` (the linear score isn't a class
+      label — fall back to local);
+    - tree / random-forest / k-means / isolation-forest -> ``None`` (documented
+      PR-8 limit: clustering/scoring needs a different strategy).
+
+    ``source`` is only required to exist; this function never pulls rows — it
+    builds a string, so scoring happens entirely in the warehouse engine and no
+    frame is materialized into the Python process.
+    """
+    coef = getattr(model, "coef_", None)
+    intercept = getattr(model, "intercept_", None)
+    if coef is None or intercept is None:
+        return None
+    if task == "classification":
+        return None
+    coefs = [float(c) for c in coef]
+    terms = [f"({float(intercept)})"]
+    for col, c in zip(feature_cols, coefs, strict=False):
+        terms.append(f"({c}) * CAST({sql_qcol('_f', col)} AS DOUBLE)")
+    expr = " + ".join(terms)
+    return f"SELECT {expr} AS prediction FROM ({frame_sql}) AS _f"

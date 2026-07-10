@@ -18,6 +18,7 @@ Use one instance per dataset/session and hand it to ``create_agent`` as both
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,9 +53,7 @@ class SqliteAuditStore(NoopAgentObserver):
         await anyio.to_thread.run_sync(self._record_event, event)
 
     # --- AgentObserver protocol: rich per-tool telemetry for the UI ---
-    async def on_tool_result(
-        self, tool_name: str, result: ToolResult, latency: object
-    ) -> None:
+    async def on_tool_result(self, tool_name: str, result: ToolResult, latency: object) -> None:
         rows = result.data
         n_rows = len(rows) if isinstance(rows, list) else None
         await anyio.to_thread.run_sync(
@@ -90,10 +89,7 @@ class SqliteAuditStore(NoopAgentObserver):
             where.append("session_id = ?")
             values.append(session_id)
 
-        query = (
-            "SELECT id, timestamp, session_id, tool, ok, latency_s, rows, error "
-            "FROM tool_calls"
-        )
+        query = "SELECT id, timestamp, session_id, tool, ok, latency_s, rows, error FROM tool_calls"
         if where:
             query += " WHERE " + " AND ".join(where)
         query += " ORDER BY timestamp DESC, rowid DESC"
@@ -194,6 +190,30 @@ class SqliteAuditStore(NoopAgentObserver):
         except Exception:
             return None
 
+    def record_trust_tuning(
+        self,
+        old: dict[str, float],
+        new: dict[str, float],
+        evidence: dict[str, Any],
+    ) -> None:
+        """Durably log an auto-applied trust-threshold change (old -> new + evidence).
+
+        Written as an ``audit_events`` row with ``event_type='trust_tuning'`` so
+        the auto-calibration (PR-9) is auditable and survives restarts.
+        """
+        detail = json.dumps({"old": old, "new": new, "evidence": evidence}, default=str)
+        event = AuditEvent(
+            id=str(uuid4()),
+            timestamp=datetime.now(timezone.utc),
+            event_type="trust_tuning",
+            trace_id=self.session_id or "auto",
+            session_id=self.session_id or "auto",
+            principal="trust_auto_tuner",
+            tenant="analytics",
+            detail=detail,
+        )
+        self._record_event(event)
+
     def tune_trust_thresholds(self) -> dict[str, Any]:
         """Suggest trust-threshold adjustments from recorded outcomes.
 
@@ -204,8 +224,7 @@ class SqliteAuditStore(NoopAgentObserver):
         """
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT trust_tier, correct FROM recommendation_outcomes "
-                "WHERE correct IS NOT NULL"
+                "SELECT trust_tier, correct FROM recommendation_outcomes WHERE correct IS NOT NULL"
             ).fetchall()
         if not rows:
             return {"action": "keep", "reason": "no labeled outcomes yet", "sample": 0}
@@ -248,8 +267,7 @@ class SqliteAuditStore(NoopAgentObserver):
                 """
             )
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_audit_events_session "
-                "ON audit_events(session_id)"
+                "CREATE INDEX IF NOT EXISTS idx_audit_events_session ON audit_events(session_id)"
             )
             conn.execute(
                 """
@@ -270,9 +288,7 @@ class SqliteAuditStore(NoopAgentObserver):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id)"
             )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_tool_calls_ts ON tool_calls(timestamp)"
-            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tool_calls_ts ON tool_calls(timestamp)")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS recommendation_outcomes (

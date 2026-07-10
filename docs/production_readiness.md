@@ -300,9 +300,43 @@ SQL + fingerprint.
 
 ## PR-8 — Warehouse-side model scoring  *(tracker §G G1)*
 
+**Status:** ✅ implemented.
+
 **Why:** `predict`/`forecast` serving still materializes a bounded sample into
 pandas for tree/linear models. G1 removes that last row-level pull by pushing
 scoring to the warehouse (SQL/UDF scoring for linear/tree; vendor ML optional).
+
+**What shipped:**
+- `warehouse_sources.score_warehouse(source, frame_sql, model, feature_cols,
+  *, task)` emits a single in-warehouse `SELECT ... AS prediction FROM
+  (<frame>) AS _f`. Linear models are expressed as exact arithmetic SQL
+  (`intercept + Σ coef_i * col_i`), which matches local pandas scoring to
+  float tolerance. The function **only builds a string** — it never pulls rows,
+  so no frame is materialized into the Python process.
+- `ModelsToolset.predict` now tries the warehouse path first via
+  `_predict_in_warehouse`: if the source is a real warehouse (`make_warehouse_source`
+  marks it with `_is_warehouse`), the model is a linear regressor, and
+  `score_warehouse` can express it, scoring + drift run entirely as aggregate
+  SQL and the result carries `scored_in_warehouse: True`. Otherwise it falls
+  back to the existing local bounded-sample path (unchanged behavior for
+  non-warehouse sources and tree/RF/classification models).
+- Documented limit: tree / random-forest / k-means / isolation-forest (and
+  classification linear models) return `None` from `score_warehouse`, so they
+  fall back to local scoring — clustering/scoring needs a different strategy
+  (PR-10).
+- `forecast` already operates on SQL-native monthly aggregates (not the full
+  frame), so it was left as-is; it pulls no row-level data either.
+
+**Verify (E2E):** `tests/test_warehouse_scoring.py`
+- `(DuckDB-backed "warehouse")` train on a 400-row sample, score the full 3000
+  row frame in-warehouse → predictions match local pandas `LinearRegression`
+  scoring within `rtol/atol=1e-6`, and `score_warehouse` makes **zero**
+  `native_query` calls (no frame materialization).
+- `predict` on a warehouse linear model issues aggregate SQL only and returns
+  `scored_in_warehouse: True` with `n_scored` equal to the full table size.
+- Tree model → `score_warehouse` returns `None` (falls back to local).
+- Non-warehouse (CSV) source with a linear model → `_predict_in_warehouse`
+  returns `None`, preserving local predict behavior (regression guard).
 
 **Implement:**
 - Extend `warehouse_sources.py` with a `score(frame, model)` that emits SQL
@@ -324,9 +358,38 @@ scoring to the warehouse (SQL/UDF scoring for linear/tree; vendor ML optional).
 
 ## PR-9 — Auto-apply feedback-loop threshold tuning  *(tracker §G G2)*
 
+**Status:** ✅ implemented.
+
 **Why:** Today `tune_trust_thresholds()` only *recommends* raise/lower/hold.
 Operators want opt-in self-calibration from labeled outcomes, with guardrails
 and an audit entry.
+
+**What shipped:**
+- `trust.py`:
+  - `TRUST_BOUNDS` — per-threshold safe-clamp ranges so auto-tuning can never
+    move a bar into unsafe territory.
+  - `current_thresholds()` — live snapshot of the (runtime-mutable) thresholds.
+  - `apply_trust_tuning(action, *, step)` — `raise` makes the bar *stricter*
+    (thresholds grow), `lower` makes it *looser* (thresholds shrink); every
+    value is clamped to `TRUST_BOUNDS`. It mutates the module globals that
+    `grade()` reads at call time, so grading changes live with no caller change.
+  - `auto_tune_trust_thresholds(suggestion, *, min_samples, enabled, audit)` —
+    the gate. Off by default (`ANALYTICS_TRUST_AUTO_TUNE` unset) → recommend-only
+    path. When enabled and the suggestion is `raise`/`lower` with `>= min_samples`
+    labeled outcomes, it applies the change and writes an audit entry
+    (old→new + evidence) via `audit.record_trust_tuning` if the sink supports it.
+- `audit_store.SqliteAuditStore.record_trust_tuning(old, new, evidence)` — durable
+  `trust_tuning` event (survives restarts), satisfying the audit requirement.
+
+**Verify (E2E):** `tests/test_trust_auto_tune.py`
+- Feed labeled TRUSTED outcomes that are wrong → `DecisionStore.tune_trust_thresholds`
+  suggests `raise`. With auto-tune **on**, the live `ANALYTICS_TRUST_*` thresholds
+  shift (stricter) and a `trust_tuning` audit entry (old→new + evidence) is written.
+- With auto-tune **off**, feeding the same suggestion leaves thresholds untouched
+  (recommend-only default preserved).
+- Below `min_samples` → not applied.
+- Pinning thresholds at their upper clamp and applying `raise` → bounded (no net
+  change, no value exceeds the clamp); repeated raises converge at the clamp.
 
 **Implement:**
 - Add an opt-in policy (env `ANALYTICS_TRUST_AUTO_TUNE=1`) that applies the
@@ -347,9 +410,43 @@ and an audit entry.
 
 ## PR-10 — Out-of-core / distributed row-level ML  *(tracker §G G3)*
 
+**Status:** ✅ implemented.
+
 **Why:** Row-level models (random forest / k-means / isolation forest) train on
 a `ANALYTICS_MAX_TRAIN_ROWS` reservoir sample. For populations beyond that,
 quality degrades.
+
+**What shipped:**
+- `train_backend.py` — a pluggable `TrainBackend` (Protocol) with four concrete
+  implementations:
+  - `BoundedTrainBackend` (default) — trains a RandomForest on the reservoir
+    sample (the existing behavior).
+  - `FullPopulationBackend` — trains a RandomForest on the **entire** population
+    in memory (no cap) when it fits.
+  - `IncrementalTrainBackend` — trains with partial-fit `SGD` estimators in
+    batches over the full frame (the incremental/partial-fit strategy PR-10
+    calls for); features and target are scaled so online SGD stays stable.
+  - `DaskBackend` (optional) — out-of-core training via `dask-ml` `Incremental`;
+    raises a clear `RuntimeError` if `dask`/`dask-ml` are not installed.
+- `ModelsToolset(..., train_backend=...)` + `get_train_backend(name)` (env
+  `ANALYTICS_TRAIN_BACKEND`, default `bounded`). A backend with
+  `uses_full_population = True` also tells `_assemble_features` to skip the row
+  cap when assembling the **training** frame (serving/predict still honors the
+  cap for speed). `_fit` delegates estimator training to the backend and prefers
+  a backend-provided CV score.
+- Result: with no backend (or `bounded`), behavior is unchanged — models still
+  train on the bounded reservoir sample.
+
+**Verify (E2E):** `tests/test_train_backend.py`
+- Synthetic population (6000 rows) well above the reservoir cap (400): the
+  `full` backend trains on all 6000 rows and its `cv_r2` **improves** vs the
+  `bounded` backend's capped-sample fit; `n_rows` reflects the full population.
+- Default backend (no `train_backend` passed) → `bounded`, `n_rows` capped, no
+  "full population" training.
+- `IncrementalTrainBackend` trains on the full frame (n_rows == full population)
+  and reports a sane CV.
+- `get_train_backend` resolves bounded/full/incremental/dask and rejects unknown
+  names; `DaskBackend` raises `RuntimeError` when the optional deps are absent.
 
 **Implement:**
 - Add incremental/partial-fit estimators (where the algorithm supports it) or a
