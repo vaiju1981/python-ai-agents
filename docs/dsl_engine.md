@@ -78,8 +78,27 @@ source of truth for "what is average price".
     a scoped `CatalogError(name, reason)`.
   - Validate every referenced base column exists in the `SemanticModel` (delegates
     to `validate_plan`-style checks) so a broken catalog fails fast.
-- `MetricCatalog.override(other)` — customer/locale overrides, mirroring
-  `nlp_api` catalog layering.
+  - `override(other)` — customer/locale overrides, mirroring `nlp_api` catalog
+    layering.
+- **`dataset_sig`-keyed catalog selection (the "tailoring" mechanism):** the
+  catalog is *not* global/hardcoded — it is selected per loaded dataset so the
+  same generic engine auto-adapts to health, casino, retail, etc.
+  - Reuse `dataset_fingerprint.fingerprint(source, row_count_aware=False)` to
+    compute the dataset's `dataset_sig` (row-count-agnostic, so pure growth
+    keeps the same catalog — consistent with PR-11).
+  - A `CatalogStore` (or `MetricCatalog.for_source`) persists one catalog file
+    per dataset under `<DSL_CATALOG_DIR>/<dataset_sig>.json` (atomic write via
+    `file_lock`; created on first use and auto-seeded from the `SemanticModel`).
+  - Selection order when building an engine for a source:
+    1. the dataset-specific catalog (`<dataset_sig>.json`), if present;
+    2. merged over a shared **base catalog** (common cross-domain calculated
+       metrics + global synonyms), if configured;
+    3. plus any per-customer `override` layer.
+    So loading health data resolves the health-tailored catalog automatically;
+    loading casino resolves the casino one — zero domain branching in the engine.
+  - Base (source) metrics are always available by ref regardless of catalog, so
+    even a brand-new dataset with no tailored catalog is fully queryable; the
+    tailored catalog only *adds* calculated metrics / synonyms on top.
 
 **Verify (E2E):** `tests/test_dsl_catalog.py`
 - Define `avg_price = sales.amount / sales.quantity`; `catalog.resolve_sql`
@@ -92,6 +111,12 @@ source of truth for "what is average price".
   column that isn't aggregatable.
 - Cycle (`a = b`, `b = a`) → `CatalogError`; unknown ref → `CatalogError`.
 - Persist to JSON and reload → identical catalog; override merges names.
+- **`dataset_sig`-keyed selection:** two different datasets (health vs casino)
+  yield two distinct catalog files under `<DSL_CATALOG_DIR>/<dataset_sig>.json`;
+  `MetricCatalog.for_source` for the health source resolves the health catalog,
+  for the casino source resolves the casino catalog, with no engine branching.
+  A brand-new dataset with no tailored catalog still queries its base metrics by
+  ref. Pure row growth (same `dataset_sig`) reuses the same catalog file.
 
 ---
 
