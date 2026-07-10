@@ -242,7 +242,7 @@ fan-out, partial-failure, and DuckDB execution are already solved.
 
 ---
 
-## PR-D5 — NL → DSL bridge via entity extraction *(stretch)*
+## PR-D5 — NL → DSL bridge via entity extraction *(stretch)*  ✅ implemented
 
 **Why:** A textual DSL is only as usable as the caller's ability to write it.
 `nlp_api` already extracts `Metric/Dimension/Period/Operation/Denom` entities
